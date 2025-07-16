@@ -8,6 +8,9 @@ shapely>=1.8.0
 pyproj>=3.3.0
 fiona>=1.8.0
 
+# GDB支持 - 项目中直接使用
+# fiona已包含GDB支持，无需额外依赖
+
 # 文档处理 - 项目中直接使用
 python-docx>=0.8.11
 xlrd>=2.0.1

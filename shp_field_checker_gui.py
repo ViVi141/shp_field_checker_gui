@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SHP文件字段批量检查工具 (GUI版本)
-用于检查SHP文件及其附属文件的表字段信息
+地理空间文件字段批量检查工具 (GUI版本)
+用于检查SHP、GDB文件及其附属文件的表字段信息
 
 作者: ViVi141
 邮箱: 747384120@qq.com
-版本: 1.0 正式版
+版本: 2.0 正式版
 更新时间: 2025年7月14日
 """
 
@@ -35,8 +35,13 @@ from shapely.ops import unary_union
 import pyproj
 from pyproj import CRS
 import logging
-from datetime import datetime
 import hashlib
+
+# 导入字段编辑模块
+try:
+    from field_editor_dialog import FieldEditorDialog
+except ImportError:
+    FieldEditorDialog = None
 
 # 配置日志系统
 logging.basicConfig(
@@ -90,6 +95,14 @@ def configure_system_fonts():
 
 # 忽略geopandas的警告
 warnings.filterwarnings('ignore')
+
+# 抑制编码转换警告
+warnings.filterwarnings('ignore', category=UserWarning, module='fiona')
+warnings.filterwarnings('ignore', category=UserWarning, module='geopandas')
+warnings.filterwarnings('ignore', category=UserWarning, module='pyogrio')
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='pyogrio')
+warnings.filterwarnings('ignore', message='.*One or several characters couldn\'t be converted correctly.*')
+warnings.filterwarnings('ignore', message='.*couldn\'t be converted correctly.*')
 
 # 默认字段标准（作为初始配置）
 # 依据《中山市自然资源数据标准规范及质检规范说明》与《国土空间基础信息平台数据编目配置的质检规则》
@@ -482,44 +495,35 @@ def check_numeric_ranges(gdf):
     return []
 
 def check_unique_identifiers(dataframes):
-    """检查编号唯一性（跨文件）- 只检测表中实际存在的字段"""
+    """检查编号唯一性（单文件内）- 只检测表中实际存在的字段"""
     issues = []
     
-    # 获取所有数据框中实际存在的唯一性字段
-    existing_unique_fields = set()
-    for df in dataframes:
+    # 对每个文件单独检查唯一性
+    for file_index, df in enumerate(dataframes):
+        # 获取该文件中实际存在的唯一性字段
+        existing_unique_fields = []
         for field_name in UNIQUE_FIELDS:
             if field_name in df.columns:
-                existing_unique_fields.add(field_name)
-    
-    # 只检查实际存在的字段
-    for field_name in existing_unique_fields:
-        all_values = []
-        file_sources = []
+                existing_unique_fields.append(field_name)
         
-        # 收集所有文件中的该字段值
-        for i, df in enumerate(dataframes):
-            if field_name in df.columns:
-                values = df[field_name].dropna().astype(str).tolist()
-                all_values.extend(values)
-                file_sources.extend([i] * len(values))
-        
-        if all_values:
-            # 检查重复值
-            value_counts = pd.Series(all_values).value_counts()
+        # 检查该文件中的唯一性
+        for field_name in existing_unique_fields:
+            values = df[field_name].dropna().astype(str).tolist()
             
-            for value, count in value_counts.items():
-                if count > 1:
-                    # 找到重复值所在的文件
-                    duplicate_files = [i for i, val in zip(file_sources, all_values) if val == value]
-                    issues.append({
-                        'field': field_name,
-                        'type': '编号唯一性',
-                        'error': f'字段 {field_name} 的值 "{value}" 在多个文件中重复出现 {count} 次',
-                        'duplicate_value': value,
-                        'duplicate_count': count,
-                        'file_indices': duplicate_files
-                    })
+            if values:
+                # 检查重复值
+                value_counts = pd.Series(values).value_counts()
+                
+                for value, count in value_counts.items():
+                    if count > 1:
+                        issues.append({
+                            'field': field_name,
+                            'type': '编号唯一性',
+                            'error': f'字段 {field_name} 的值 "{value}" 在文件内重复出现 {count} 次',
+                            'duplicate_value': value,
+                            'duplicate_count': count,
+                            'file_index': file_index
+                        })
     
     return issues
 
@@ -541,9 +545,9 @@ class SHPFieldChecker:
         
         # 使用配置管理器中的字段标准
         if field_config_manager:
-            self.field_standard = field_config_manager.get_field_standards()
+            self.field_standards = field_config_manager.get_field_standards()
         else:
-            self.field_standard = FIELD_STANDARDS
+            self.field_standards = FIELD_STANDARDS
         
         # 检查结果存储
         self.results = {
@@ -560,12 +564,20 @@ class SHPFieldChecker:
         self.all_dataframes = []
         self.file_indices = []
         
-    def find_shp_files(self) -> List[Path]:
-        """查找目录下的所有SHP文件"""
-        shp_files = []
+    def find_geospatial_files(self) -> List[Path]:
+        """查找目录下的所有地理空间文件（SHP和GDB）"""
+        geospatial_files = []
+        
+        # 查找SHP文件
         for file_path in self.input_dir.rglob("*.shp"):
-            shp_files.append(file_path)
-        return shp_files
+            geospatial_files.append(file_path)
+        
+        # 查找GDB文件夹
+        for gdb_path in self.input_dir.rglob("*.gdb"):
+            if gdb_path.is_dir():
+                geospatial_files.append(gdb_path)
+        
+        return geospatial_files
     
     def check_shp_file(self, shp_path: Path) -> Dict:
         """检查单个SHP文件的字段信息（优化大文件处理）"""
@@ -729,8 +741,8 @@ class SHPFieldChecker:
                             'sample_values': sample_gdf[col].dropna().head(3).tolist() if sample_gdf[col].dtype == 'object' else []
                         }
                         # 字段合规性检查 - 只检测表中实际存在的字段
-                        if col in self.field_standard:
-                            issues = check_field_compliance(col, sample_gdf[col], self.field_standard[col])
+                        if col in self.field_standards:
+                            issues = check_field_compliance(col, sample_gdf[col], self.field_standards[col])
                             field_info['compliance_issues'] = issues
                         result['fields'].append(field_info)
                 
@@ -814,8 +826,8 @@ class SHPFieldChecker:
                     'sample_values': df[col].dropna().head(3).tolist() if df[col].dtype == 'object' else []
                 }
                 # 字段合规性检查
-                if col in self.field_standard:
-                    issues = check_field_compliance(col, df[col], self.field_standard[col])
+                if col in self.field_standards:
+                    issues = check_field_compliance(col, df[col], self.field_standards[col])
                     field_info['compliance_issues'] = issues
                 result['fields'].append(field_info)
             
@@ -827,12 +839,16 @@ class SHPFieldChecker:
             if "codec can't decode" in str(e):
                 self.results['errors'].append({
                     'file': str(dbf_path),
-                    'error': f"编码错误 - 可忽略: {str(e)}"
+                    'error': f"编码错误 - 可忽略: {str(e)}",
+                    'level': ERROR_LEVELS['IGNORABLE'],
+                    'type': ERROR_TYPES['ENCODING_ERROR']
                 })
             else:
                 self.results['errors'].append({
                     'file': str(dbf_path),
-                    'error': str(e)
+                    'error': str(e),
+                    'level': ERROR_LEVELS['CRITICAL'],
+                    'type': ERROR_TYPES['OTHER_ERROR']
                 })
         finally:
             # 记录检查结束时间
@@ -840,13 +856,165 @@ class SHPFieldChecker:
         
         return result
     
+    def check_gdb_file(self, gdb_path: Path) -> Dict:
+        """检查单个GDB文件的字段信息"""
+        # 记录检查开始时间
+        check_start_time = datetime.now()
+        
+        result = {
+            'file_name': gdb_path.name,
+            'file_path': str(gdb_path),
+            'file_type': 'GDB',
+            'geometry_type': None,
+            'feature_count': 0,
+            'fields': [],
+            'field_count': 0,
+            'file_size': 0,
+            'layers': [],
+            'layer_count': 0,
+            'error': None,
+            'file_hash': None,
+            'check_start_time': check_start_time.isoformat(),
+            'check_end_time': None,
+            'topology_issues': [],
+            'attribute_issues': [],
+            'basic_issues': []
+        }
+        
+        try:
+            # 获取文件夹大小（GDB是文件夹）
+            if gdb_path.is_dir():
+                total_size = 0
+                for file_path in gdb_path.rglob('*'):
+                    if file_path.is_file():
+                        total_size += file_path.stat().st_size
+                result['file_size'] = total_size
+            else:
+                result['file_size'] = gdb_path.stat().st_size
+            
+            # 计算文件夹哈希值（简化版本，只计算主要文件）
+            result['file_hash'] = self._calculate_gdb_hash(gdb_path)
+            
+            # 读取GDB中的所有图层
+            try:
+                layers = gpd.read_file(gdb_path, driver='OpenFileGDB')
+                if isinstance(layers, gpd.GeoDataFrame):
+                    # 单个图层
+                    layers = [layers]
+                
+                result['layer_count'] = len(layers)
+                total_features = 0
+                all_fields = set()
+                
+                for i, layer in enumerate(layers):
+                    layer_info = {
+                        'layer_name': f'Layer_{i+1}',
+                        'feature_count': len(layer),
+                        'geometry_type': str(layer.geometry.geom_type.iloc[0]) if len(layer) > 0 else 'Unknown',
+                        'fields': []
+                    }
+                    
+                    # 获取字段信息
+                    for col in layer.columns:
+                        if col != 'geometry':
+                            field_info = {
+                                'name': col,
+                                'type': str(layer[col].dtype),
+                                'null_count': layer[col].isnull().sum(),
+                                'unique_count': layer[col].nunique(),
+                                'sample_values': layer[col].dropna().head(3).tolist() if layer[col].dtype == 'object' else []
+                            }
+                            
+                            # 字段合规性检查
+                            if col in self.field_standards:
+                                issues = check_field_compliance(col, layer[col], self.field_standards[col])
+                                field_info['compliance_issues'] = issues
+                            
+                            layer_info['fields'].append(field_info)
+                            all_fields.add(col)
+                    
+                    layer_info['field_count'] = len(layer_info['fields'])
+                    result['layers'].append(layer_info)
+                    total_features += layer_info['feature_count']
+                    
+                    # 存储数据用于跨文件检查
+                    self.all_dataframes.append(layer)
+                    self.all_geometries.extend(layer.geometry.tolist())
+                    self.file_indices.append(len(self.all_dataframes) - 1)
+                
+                result['feature_count'] = total_features
+                result['field_count'] = len(all_fields)
+                result['geometry_type'] = 'Multiple' if len(layers) > 1 else (layers[0].geometry.geom_type.iloc[0] if len(layers) > 0 else 'Unknown')
+                
+                # 几何检查
+                if self.all_geometries:
+                    # 拓扑检查
+                    topology_gaps = check_topology_gaps(self.all_geometries)
+                    topology_overlaps = check_topology_overlaps(self.all_geometries)
+                    geometry_validity = check_geometry_validity(self.all_geometries)
+                    
+                    if topology_gaps:
+                        result['topology_issues'].extend(topology_gaps)
+                    if topology_overlaps:
+                        result['topology_issues'].extend(topology_overlaps)
+                    if geometry_validity:
+                        result['basic_issues'].extend(geometry_validity)
+                    
+                    # 坐标系统检查
+                    if layers:
+                        crs_issues = check_coordinate_system(layers[0])
+                        if crs_issues:
+                            result['basic_issues'].extend(crs_issues)
+                
+            except Exception as e:
+                result['error'] = f"无法读取GDB文件: {str(e)}"
+                self.results['errors'].append({
+                    'file': str(gdb_path),
+                    'error': f"GDB读取错误: {str(e)}",
+                    'level': ERROR_LEVELS['CRITICAL'],
+                    'type': ERROR_TYPES['OTHER_ERROR']
+                })
+                
+        except Exception as e:
+            result['error'] = str(e)
+            self.results['errors'].append({
+                'file': str(gdb_path),
+                'error': str(e),
+                'level': ERROR_LEVELS['CRITICAL'],
+                'type': ERROR_TYPES['OTHER_ERROR']
+            })
+        finally:
+            # 记录检查结束时间
+            result['check_end_time'] = datetime.now().isoformat()
+        
+        return result
+    
+    def _calculate_gdb_hash(self, gdb_path: Path) -> str:
+        """计算GDB文件夹的哈希值（简化版本）"""
+        try:
+            hash_obj = hashlib.sha256()
+            
+            # 只计算主要文件
+            main_files = ['gdb', 'freelist', 'a00000001.gdbtable', 'a00000001.gdbindexes']
+            
+            for file_name in main_files:
+                file_path = gdb_path / file_name
+                if file_path.exists():
+                    with open(file_path, 'rb') as f:
+                        for chunk in iter(lambda: f.read(4096), b""):
+                            hash_obj.update(chunk)
+            
+            return hash_obj.hexdigest()
+        except Exception:
+            return "无法计算哈希值"
+    
     def run_check(self, progress_callback=None) -> Dict:
         """运行检查"""
         logger.info(f"开始检查目录: {self.input_dir}")
         
-        # 查找SHP文件
-        shp_files = self.find_shp_files()
-        logger.info(f"找到 {len(shp_files)} 个SHP文件")
+        # 查找地理空间文件
+        geospatial_files = self.find_geospatial_files()
+        logger.info(f"找到 {len(geospatial_files)} 个地理空间文件")
         
         # 查找DBF文件
         dbf_files = []
@@ -854,17 +1022,22 @@ class SHPFieldChecker:
             dbf_files.append(file_path)
         logger.info(f"找到 {len(dbf_files)} 个DBF文件")
         
-        total_files = len(shp_files) + len(dbf_files)
+        total_files = len(geospatial_files) + len(dbf_files)
         processed_files = 0
         
-        # 检查SHP文件
-        for i, shp_path in enumerate(shp_files):
-            logger.info(f"正在检查 ({i+1}/{len(shp_files)}): {shp_path.name}")
-            result = self.check_shp_file(shp_path)
+        # 检查地理空间文件
+        for i, file_path in enumerate(geospatial_files):
+            logger.info(f"正在检查 ({i+1}/{len(geospatial_files)}): {file_path.name}")
+            if file_path.suffix.lower() == '.shp':
+                result = self.check_shp_file(file_path)
+            elif file_path.suffix.lower() == '.gdb' or file_path.is_dir():
+                result = self.check_gdb_file(file_path)
+            else:
+                continue
             self.results['files'].append(result)
             processed_files += 1
             if progress_callback:
-                progress_callback(processed_files, total_files, f"检查SHP文件: {shp_path.name}")
+                progress_callback(processed_files, total_files, f"检查文件: {file_path.name}")
         
         # 检查DBF文件
         for i, dbf_path in enumerate(dbf_files):
@@ -907,10 +1080,12 @@ class SHPFieldChecker:
         """生成检查结果摘要"""
         total_files = len(self.results['files'])
         shp_files = [f for f in self.results['files'] if f['file_name'].endswith('.shp')]
+        gdb_files = [f for f in self.results['files'] if f.get('file_type') == 'GDB']
         dbf_files = [f for f in self.results['files'] if f['file_name'].endswith('.dbf')]
         error_files = len(self.results['errors'])
         
-        total_features = sum(f.get('feature_count', 0) for f in shp_files)
+        # 计算总要素数量（包括GDB文件）
+        total_features = sum(f.get('feature_count', 0) for f in shp_files + gdb_files)
         total_fields = sum(f.get('field_count', 0) for f in self.results['files'])
         
         # 统计新检查结果
@@ -922,6 +1097,7 @@ class SHPFieldChecker:
             'check_time': datetime.now().isoformat(),
             'total_files': total_files,
             'shp_files': len(shp_files),
+            'gdb_files': len(gdb_files),
             'dbf_files': len(dbf_files),
             'error_files': error_files,
             'total_features': total_features,
@@ -1149,12 +1325,15 @@ class SHPFieldChecker:
                 else:
                     compliant_fields += 1
         
+        # 计算合规率，避免除零错误
+        compliance_rate = (compliant_fields/total_fields*100) if total_fields > 0 else 0.0
+        
         compliance_text = f"""
 字段合规性统计：
 总字段数：{total_fields} 个
 合规字段：{compliant_fields} 个
 不合规字段：{non_compliant_fields} 个
-合规率：{(compliant_fields/total_fields*100):.1f}% (如果总字段数大于0)
+合规率：{compliance_rate:.1f}%
         """
         doc.add_paragraph(compliance_text.strip())
         
@@ -1180,6 +1359,9 @@ class SHPFieldChecker:
         # 检查结论
         doc.add_heading('6. 检查结论', level=1)
         
+        # 计算合规率，避免除零错误
+        compliance_rate = (compliant_fields/total_fields*100) if total_fields > 0 else 0.0
+        
         conclusion = f"""
 基于本次检查结果，得出以下结论：
 
@@ -1187,7 +1369,7 @@ class SHPFieldChecker:
 2. 错误严重程度：
    - 可忽略错误：{len(ignorable_errors)} 个（主要为编码和几何问题）
    - 不可忽略错误：{len(critical_errors)} 个
-3. 字段合规性：合规率 {(compliant_fields/total_fields*100):.1f}% (如果总字段数大于0)
+3. 字段合规性：合规率 {compliance_rate:.1f}%
 
 建议：
 - 对于可忽略错误，建议在数据预处理阶段进行编码转换和几何修复
@@ -1270,7 +1452,7 @@ class SHPFieldCheckerGUI:
     
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("SHP字段检查工具 v1.0")
+        self.root.title("地理空间文件字段检查工具 v2.0")
         self.root.geometry("1400x900")
         
         # 配置系统字体
@@ -1324,7 +1506,7 @@ class SHPFieldCheckerGUI:
         title_label.pack(side=tk.LEFT)
         
         # 版本信息
-        version_label = ttk.Label(title_frame, text="v1.0", 
+        version_label = ttk.Label(title_frame, text="v2.0", 
                                  font=("TkDefaultFont", 10), foreground="#666666")
         version_label.pack(side=tk.RIGHT, pady=(0, 5))
         
@@ -1426,9 +1608,17 @@ class SHPFieldCheckerGUI:
         error_frame = ttk.Frame(notebook)
         notebook.add(error_frame, text="⚠️ 错误信息")
         
-        self.error_text = scrolledtext.ScrolledText(error_frame, height=12, wrap=tk.WORD, 
+        # 错误信息文本区域
+        error_text_frame = ttk.Frame(error_frame)
+        error_text_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.error_text = scrolledtext.ScrolledText(error_text_frame, height=12, wrap=tk.WORD, 
                                                    font=("Consolas", 9))
         self.error_text.pack(fill=tk.BOTH, expand=True)
+        
+        # 编辑按钮区域
+        self.edit_buttons_frame = ttk.Frame(error_frame)
+        self.edit_buttons_frame.pack(fill=tk.X, pady=5)
         
         # 状态栏
         status_bar = ttk.Frame(main_frame)
@@ -1579,10 +1769,20 @@ class SHPFieldCheckerGUI:
             total_files = summary.get('total_files', 0)
             error_files = summary.get('error_files', 0)
             
-            if error_files == 0:
+            # 检查是否有字段合规性问题
+            field_compliance_issues = []
+            if self.results and isinstance(self.results, dict):
+                for file_result in self.results.get('files', []):
+                    for field in file_result.get('fields', []):
+                        compliance_issues = field.get('compliance_issues', [])
+                        if isinstance(compliance_issues, list) and compliance_issues:
+                            field_compliance_issues.extend(compliance_issues)
+            
+            if error_files == 0 and not field_compliance_issues:
                 messagebox.showinfo("完成", f"检查完成！\n\n共检查 {total_files} 个文件\n没有发现错误")
             else:
-                messagebox.showwarning("完成", f"检查完成！\n\n共检查 {total_files} 个文件\n发现 {error_files} 个文件有错误\n请查看详细结果")
+                issue_count = error_files + len(field_compliance_issues)
+                messagebox.showwarning("完成", f"检查完成！\n\n共检查 {total_files} 个文件\n发现 {issue_count} 个问题\n请查看详细结果")
         else:
             messagebox.showwarning("完成", "检查完成，但没有生成结果")
     
@@ -1698,11 +1898,122 @@ DBF文件数量: {summary['dbf_files']}
                     error_text += f"  文件: {Path(str(issue.get('file', ''))).name}\n"
                     error_text += f"  问题: {str(issue.get('issue', ''))}\n\n"
         
-        if not any([errors, topology_issues, attribute_issues, basic_issues]):
+        # 检查字段合规性问题（详细显示）
+        field_compliance_issues = []
+        field_edit_info = []  # 存储编辑信息
+        
+        for file_result in files:
+            file_name = file_result.get('file_name', '')
+            file_path = file_result.get('file_path', '')
+            # GDB多图层
+            if file_result.get('layers'):
+                for layer in file_result['layers']:
+                    layer_name = layer.get('layer_name', '')
+                    for field in layer.get('fields', []):
+                        compliance_issues = field.get('compliance_issues', [])
+                        if isinstance(compliance_issues, list) and compliance_issues:
+                            for issue in compliance_issues:
+                                field_compliance_issues.append(
+                                    f"文件: {file_name} 图层: {layer_name} 字段: {field['name']} 合规性问题: {issue} "
+                                    f"(空值数量: {field.get('null_count', 'N/A')}, 唯一值数量: {field.get('unique_count', 'N/A')})"
+                                )
+                                # 存储编辑信息
+                                field_edit_info.append({
+                                    'file_path': file_path,
+                                    'field_name': field['name'],
+                                    'layer_name': layer_name,
+                                    'issue': issue
+                                })
+            # 普通SHP/DBF
+            else:
+                for field in file_result.get('fields', []):
+                    compliance_issues = field.get('compliance_issues', [])
+                    if isinstance(compliance_issues, list) and compliance_issues:
+                        for issue in compliance_issues:
+                            field_compliance_issues.append(
+                                f"文件: {file_name} 字段: {field['name']} 合规性问题: {issue} "
+                                f"(空值数量: {field.get('null_count', 'N/A')}, 唯一值数量: {field.get('unique_count', 'N/A')})"
+                            )
+                            # 存储编辑信息
+                            field_edit_info.append({
+                                'file_path': file_path,
+                                'field_name': field['name'],
+                                'layer_name': None,
+                                'issue': issue
+                            })
+        
+        if not any([errors, topology_issues, attribute_issues, basic_issues, field_compliance_issues]):
             error_text += "没有发现错误。\n"
+        else:
+            if field_compliance_issues:
+                error_text += "字段合规性问题:\n"
+                for i, issue in enumerate(field_compliance_issues):
+                    error_text += f"  {issue}\n"
+                error_text += "\n"
+                
+                # 添加编辑按钮
+                if field_edit_info:
+                    error_text += "点击下方按钮编辑字段:\n"
+                    for i, edit_info in enumerate(field_edit_info):
+                        error_text += f"  [编辑{i+1}] {edit_info['field_name']} - {edit_info['issue']}\n"
+                error_text += "\n"
         
         self.error_text.delete(1.0, tk.END)
         self.error_text.insert(1.0, error_text)
+        
+        # 创建编辑按钮
+        self.create_edit_buttons(field_edit_info)
+    
+    def create_edit_buttons(self, field_edit_info):
+        """创建编辑按钮"""
+        # 清空现有按钮
+        for widget in self.edit_buttons_frame.winfo_children():
+            widget.destroy()
+        
+        if not field_edit_info or FieldEditorDialog is None:
+            return
+        
+        # 创建按钮标题
+        ttk.Label(self.edit_buttons_frame, text="字段编辑:", font=("Arial", 9, "bold")).pack(anchor=tk.W)
+        
+        # 创建按钮容器
+        buttons_container = ttk.Frame(self.edit_buttons_frame)
+        buttons_container.pack(fill=tk.X, pady=5)
+        
+        # 为每个字段创建编辑按钮
+        for i, edit_info in enumerate(field_edit_info):
+            button_text = f"编辑{i+1}: {edit_info['field_name']}"
+            if edit_info['layer_name']:
+                button_text += f" ({edit_info['layer_name']})"
+            
+            btn = ttk.Button(buttons_container, text=button_text, 
+                           command=lambda info=edit_info: self.open_field_editor(info))
+            btn.pack(side=tk.LEFT, padx=5, pady=2)
+    
+    def open_field_editor(self, edit_info):
+        """打开字段编辑器"""
+        try:
+            if FieldEditorDialog is None:
+                messagebox.showerror("错误", "字段编辑功能未启用，请确保field_editor_dialog.py文件存在")
+                return
+            
+            # 打开字段编辑弹窗
+            editor = FieldEditorDialog(
+                self.root,
+                edit_info['file_path'],
+                edit_info['field_name'],
+                edit_info['layer_name']
+            )
+            
+            # 等待编辑完成
+            if editor.run():
+                # 如果文件被修改，提示重新检查
+                if messagebox.askyesno("提示", "文件已修改，是否重新检查？"):
+                    self.start_check()
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"打开字段编辑器失败: {str(e)}")
+            logger.error(f"打开字段编辑器失败: {e}")
     
     def export_report(self):
         """导出报告"""

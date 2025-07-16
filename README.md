@@ -1,18 +1,38 @@
-# SHP文件字段检查工具
+# 地理空间文件字段检查工具
 
 **作者**: ViVi141  
 **邮箱**: 747384120@qq.com  
-**版本**: 1.0 正式版
-**更新时间**: 2025年7月14日
+**版本**: 2.0 正式版
+**更新时间**: 2025年1月15日
 
-一个功能强大的SHP文件质量检查工具，支持拓扑检测、属性验证、几何分析等多种检查功能。
+一个功能强大的地理空间文件质量检查工具，支持SHP和GDB格式，具备拓扑检测、属性验证、几何分析等多种检查功能。
+
+## 🆕 v2.0 主要更新
+
+相比v1.0版本，v2.0带来了以下重要改进：
+
+### 🎯 核心功能增强
+- **GDB格式支持**: 新增对ESRI Geodatabase格式的完整支持
+- **多图层处理**: 支持GDB中的多个图层检查和统计
+- **Unicode字符支持**: 完善对书名号、引号等特殊字符的支持
+
+### 🔧 技术优化
+- **编码处理优化**: 改进文本过滤和解码功能，支持更多字符类型
+- **语法错误修复**: 修复所有代码语法错误，提高程序稳定性
+- **显示效果优化**: 改进字段编辑对话框中的字符显示效果
+
+### 🐛 问题修复
+- **书名号显示**: 修复书名号（《》）在字段编辑表格中无法显示的问题
+- **重复导入**: 修复了主程序中的重复导入问题
+- **字符显示异常**: 解决特殊字符在表格中显示异常的问题
 
 ## 🚀 功能特点
 
 ### 核心功能
-- 🔍 **批量检查**: 自动扫描指定目录下的所有SHP文件
+- 🔍 **批量检查**: 自动扫描指定目录下的所有SHP和GDB文件
 - 📊 **字段分析**: 提取并分析每个字段的类型、空值数量、唯一值数量等
 - 📁 **相关文件检查**: 检查SHP文件的相关文件（.dbf, .shx, .prj等）
+- 🗂️ **GDB支持**: 支持ESRI Geodatabase格式，可读取多个图层
 - 📈 **统计报告**: 生成详细的检查报告，支持JSON、CSV、Word格式
 - 🎯 **错误处理**: 完善的错误处理机制，记录无法读取的文件
 
@@ -65,8 +85,23 @@ with open('shp_field_check_results_20250115_103000.json', 'r') as f:
     
 for file_result in results['files']:
     print(f"文件: {file_result['file_name']}")
+    print(f"文件类型: {file_result.get('file_type', 'SHP')}")
     print(f"哈希值: {file_result['file_hash']}")
     print(f"检查时间: {file_result['check_start_time']}")
+```
+
+#### GDB文件检查
+```python
+# 检查GDB文件信息
+for file_result in results['files']:
+    if file_result.get('file_type') == 'GDB':
+        print(f"GDB文件: {file_result['file_name']}")
+        print(f"图层数量: {file_result.get('layer_count', 0)}")
+        print(f"总要素数量: {file_result.get('feature_count', 0)}")
+        for layer in file_result.get('layers', []):
+            print(f"  图层: {layer['layer_name']}")
+            print(f"    要素数量: {layer['feature_count']}")
+            print(f"    几何类型: {layer['geometry_type']}")
 ```
 
 #### 重复文件检测
@@ -109,6 +144,13 @@ python shp_field_checker_simple.py "控规_SHAPE_20250227143118" -d
 - **文件完整性**: 检查SHP文件的相关文件是否齐全
 - **编码兼容性**: 处理不同编码格式的文件
 
+### 4. GDB格式支持
+- **多图层处理**: 自动识别和检查GDB中的所有图层
+- **图层统计**: 统计每个图层的要素数量、几何类型等信息
+- **字段分析**: 对每个图层的字段进行详细分析
+- **哈希值计算**: 为GDB文件夹计算完整性哈希值
+- **跨图层检查**: 支持跨图层的拓扑和属性检查
+
 ## 🔐 哈希值与时间戳功能
 
 ### 文件哈希值
@@ -137,6 +179,9 @@ python shp_field_checker_simple.py "控规_SHAPE_20250227143118" -d
 {
   "summary": {
     "total_files": 58,
+    "shp_files": 45,
+    "gdb_files": 3,
+    "dbf_files": 10,
     "total_issues": 0,
     "check_time": "2025-01-XX 10:30:00"
   },
@@ -148,6 +193,23 @@ python shp_field_checker_simple.py "控规_SHAPE_20250227143118" -d
       "check_start_time": "2025-01-15T10:30:00.123456",
       "check_end_time": "2025-01-15T10:30:05.654321",
       "issues": []
+    },
+    {
+      "filename": "example.gdb",
+      "file_type": "GDB",
+      "layer_count": 3,
+      "feature_count": 1250,
+      "layers": [
+        {
+          "layer_name": "Layer_1",
+          "feature_count": 500,
+          "geometry_type": "Polygon",
+          "field_count": 15
+        }
+      ],
+      "file_hash": "b83f9c61ef8b63b4b3d9951fe4f5c4419560fb4de8547edf056bd1f67ad3b985",
+      "check_start_time": "2025-01-15T10:30:10.123456",
+      "check_end_time": "2025-01-15T10:30:15.654321"
     }
   ]
 }
