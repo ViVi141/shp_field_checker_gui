@@ -2598,9 +2598,9 @@ DBF文件数量: {summary['dbf_files']}
             
             for field_key, edit_info in critical_fields:
                 button_text = f"编辑 {edit_info['field_name']}"
-            if edit_info['layer_name']:
-                button_text += f" ({edit_info['layer_name']})"
-            
+                if edit_info['layer_name']:
+                    button_text += f" ({edit_info['layer_name']})"
+                
                 btn = ttk.Button(critical_buttons_frame, text=button_text, 
                                command=lambda info=edit_info: self.open_field_editor(info),
                                style='Critical.TButton')
