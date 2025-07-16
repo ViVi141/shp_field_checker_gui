@@ -19,5 +19,5 @@ openpyxl>=3.0.9
 # GUI组件 - 项目中直接使用
 pandastable>=0.12.3
 
-# 可选：打包工具（如果需要生成exe）
-# pyinstaller>=5.0.0 
+# 打包工具（用于生成exe）
+pyinstaller>=5.0.0 

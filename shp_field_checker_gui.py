@@ -156,7 +156,7 @@ DEFAULT_FIELD_STANDARDS = {
     "LDLSX":   {"字段别名": "绿地率上限", "字段类型": "Double", "必填": True, "唯一": False},
     "LDLLX":   {"字段别名": "绿地率下限", "字段类型": "Double", "必填": True, "唯一": False},
     "NJLJXZL": {"字段别名": "年均流总量控制率", "字段类型": "Double", "必填": True, "唯一": False},
-    "PFDATA":  {"字段别名": "批准时间", "字段类型": "Text", "必填": True, "唯一": False},
+    "PFDATE":  {"字段别名": "批准日期", "字段类型": "Text", "必填": True, "唯一": False},
     "PFNAME":  {"字段别名": "批准文号", "字段类型": "Text", "必填": False, "唯一": False},
     "PTGSS":   {"字段别名": "配套公共实施项目与规模", "字段类型": "Text", "必填": True, "唯一": False},
     "PTSZS":   {"字段别名": "配套市政设施", "字段类型": "Text", "必填": True, "唯一": False},
@@ -205,6 +205,10 @@ ERROR_TYPES = {
     'TOPOLOGY': '拓扑错误',
     'ATTRIBUTE': '属性错误',
     'BASIC': '基础错误',
+    'DATA_INTEGRITY': '数据完整性错误',
+    'LOGICAL_CONSISTENCY': '逻辑一致性错误',
+    'SPATIAL_REFERENCE': '空间参考错误',
+    'FIELD_VALUE_CONSISTENCY': '字段值一致性错误',
     'OTHER_ERROR': '其他错误'
 }
 
@@ -334,9 +338,212 @@ class FieldConfigManager:
         global FIELD_STANDARDS
         FIELD_STANDARDS = self.field_standards.copy()
 
+def summarize_required_field_errors(required_field_issues):
+    """汇总必填字段错误，优化显示同一行的多个错误"""
+    if not required_field_issues:
+        return []
+    
+    # 按行索引分组
+    row_errors = {}
+    critical_errors = 0
+    ignorable_errors = 0
+    
+    for issue in required_field_issues:
+        row_idx = issue.get('row_index', 0)
+        if row_idx not in row_errors:
+            row_errors[row_idx] = {'fields': [], 'critical': 0, 'ignorable': 0}
+        
+        # 统计错误等级
+        for field_error in issue.get('field_errors', []):
+            field_name = field_error['field_name']
+            error_level = field_error['error_level']
+            row_errors[row_idx]['fields'].append(field_name)
+            
+            if error_level == ERROR_LEVELS['CRITICAL']:
+                row_errors[row_idx]['critical'] += 1
+                critical_errors += 1
+            else:
+                row_errors[row_idx]['ignorable'] += 1
+                ignorable_errors += 1
+    
+    # 生成汇总报告
+    summary_issues = []
+    
+    # 统计信息
+    total_rows_with_errors = len(row_errors)
+    all_missing_fields = set()
+    for row_data in row_errors.values():
+        all_missing_fields.update(row_data['fields'])
+    
+    # 添加总体统计
+    summary_issues.append({
+        'type': '必填字段错误汇总',
+        'error': f'共有{total_rows_with_errors}行存在必填字段缺失，涉及字段: {", ".join(sorted(all_missing_fields))}',
+        'detail': f'不可忽略错误: {critical_errors}个，可忽略错误: {ignorable_errors}个',
+        'total_rows': total_rows_with_errors,
+        'total_fields': len(all_missing_fields),
+        'critical_errors': critical_errors,
+        'ignorable_errors': ignorable_errors
+    })
+    
+    # 按错误等级分组
+    critical_rows = [row_idx for row_idx, data in row_errors.items() if data['critical'] > 0]
+    ignorable_rows = [row_idx for row_idx, data in row_errors.items() if data['ignorable'] > 0]
+    
+    if critical_rows:
+        summary_issues.append({
+            'type': '不可忽略错误',
+            'error': f'有{len(critical_rows)}行存在不可忽略的必填字段缺失',
+            'detail': f'涉及行: {", ".join([str(r+1) for r in critical_rows])}',
+            'error_level': ERROR_LEVELS['CRITICAL']
+        })
+    
+    if ignorable_rows:
+        summary_issues.append({
+            'type': '可忽略错误',
+            'error': f'有{len(ignorable_rows)}行存在可忽略的必填字段缺失',
+            'detail': f'涉及行: {", ".join([str(r+1) for r in ignorable_rows])}',
+            'error_level': ERROR_LEVELS['IGNORABLE']
+        })
+    
+    # 添加最严重的错误行（不可忽略错误最多的行）
+    if critical_rows:
+        max_critical_row = max(critical_rows, key=lambda r: row_errors[r]['critical'])
+        critical_fields = [f for f in row_errors[max_critical_row]['fields'] 
+                         if any(fe['field_name'] == f and fe['error_level'] == ERROR_LEVELS['CRITICAL'] 
+                               for fe in next(issue for issue in required_field_issues 
+                                            if issue.get('row_index') == max_critical_row).get('field_errors', []))]
+        summary_issues.append({
+            'type': '最严重错误行',
+            'error': f'第{max_critical_row+1}行存在{row_errors[max_critical_row]["critical"]}个不可忽略错误',
+            'detail': f'不可忽略字段: {", ".join(critical_fields)}',
+            'error_level': ERROR_LEVELS['CRITICAL']
+        })
+    
+    return summary_issues
+
+def get_field_error_level(field_name, file_name):
+    """根据字段名和文件名确定错误等级"""
+    # 转换为大写以便比较
+    file_name_upper = file_name.upper()
+    
+    # 定义特殊规则
+    critical_fields_for_special_files = {
+        'GHMC': ['YDFW', 'GHJX'],  # 规划名称字段在YDFW或GHJX文件中为不可忽略
+        'PFDATE': ['YDFW', 'GHJX']  # 批准日期字段在YDFW或GHJX文件中为不可忽略
+    }
+    
+    # 检查是否为特殊字段
+    if field_name in critical_fields_for_special_files:
+        required_patterns = critical_fields_for_special_files[field_name]
+        for pattern in required_patterns:
+            if pattern in file_name_upper:
+                return ERROR_LEVELS['CRITICAL']  # 不可忽略
+    
+    # 默认返回可忽略
+    return ERROR_LEVELS['IGNORABLE']
+
+def check_required_fields_detailed(gdf, field_standards, file_name=None):
+    """详细检查必填字段，返回具体的空值行信息"""
+    issues = []
+    
+    # 获取所有必填字段
+    required_fields = []
+    for field_name, standard in field_standards.items():
+        if standard.get('必填') or str(standard.get('约束条件', '')).strip().upper() == 'O':
+            if field_name in gdf.columns:
+                required_fields.append(field_name)
+    
+    # 添加调试信息
+    total_required_in_standard = len([f for f, s in field_standards.items() if s.get('必填')])
+    missing_required_fields = [f for f, s in field_standards.items() if s.get('必填') and f not in gdf.columns]
+    
+    logger.info(f"检查必填字段: 标准中定义了{total_required_in_standard}个必填字段")
+    logger.info(f"数据文件中存在{len(required_fields)}个必填字段: {required_fields}")
+    logger.info(f"数据文件所有字段: {list(gdf.columns)}")
+    
+    if missing_required_fields:
+        logger.info(f"标准中定义但数据文件中不存在的必填字段: {missing_required_fields}")
+    
+    if not required_fields:
+        logger.warning("未找到任何必填字段，请检查字段标准配置")
+        return issues
+    
+    # 检查每一行的必填字段
+    total_rows = len(gdf)
+    rows_with_errors = 0
+    
+    for row_idx in range(total_rows):
+        missing_fields = []
+        for field_name in required_fields:
+            # 更严格的空值检查
+            value = gdf.iloc[row_idx][field_name]
+            if pd.isna(value) or value == '' or str(value).strip() == '':
+                missing_fields.append(field_name)
+        
+        if missing_fields:
+            rows_with_errors += 1
+            
+            # 为每个缺失字段确定错误等级
+            field_errors = []
+            for field_name in missing_fields:
+                error_level = get_field_error_level(field_name, file_name or '')
+                field_errors.append({
+                    'field_name': field_name,
+                    'error_level': error_level,
+                    'error_type': 'REQUIRED_FIELD_ERROR'
+                })
+            
+            issues.append({
+                'row_index': row_idx,
+                'missing_fields': missing_fields,
+                'field_errors': field_errors,
+                'error': f'第{row_idx+1}行缺少必填字段: {", ".join(missing_fields)}',
+                'type': '必填字段错误'
+            })
+    
+    # 添加统计信息
+    if rows_with_errors > 0:
+        logger.info(f"必填字段检查完成: 总共{total_rows}行，其中{rows_with_errors}行存在必填字段缺失")
+        
+        # 统计每个字段的缺失情况
+        field_missing_stats = {}
+        critical_errors = 0
+        ignorable_errors = 0
+        
+        for issue in issues:
+            for field_error in issue.get('field_errors', []):
+                field_name = field_error['field_name']
+                error_level = field_error['error_level']
+                
+                if field_name not in field_missing_stats:
+                    field_missing_stats[field_name] = {'critical': 0, 'ignorable': 0}
+                
+                if error_level == ERROR_LEVELS['CRITICAL']:
+                    field_missing_stats[field_name]['critical'] += 1
+                    critical_errors += 1
+                else:
+                    field_missing_stats[field_name]['ignorable'] += 1
+                    ignorable_errors += 1
+        
+        for field, stats in field_missing_stats.items():
+            if stats['critical'] > 0:
+                logger.info(f"字段 {field} 不可忽略错误 {stats['critical']} 次")
+            if stats['ignorable'] > 0:
+                logger.info(f"字段 {field} 可忽略错误 {stats['ignorable']} 次")
+        
+        logger.info(f"总计: 不可忽略错误 {critical_errors} 个，可忽略错误 {ignorable_errors} 个")
+    
+    # 如果错误数量较多，进行汇总
+    if len(issues) > 10:
+        return summarize_required_field_errors(issues)
+    else:
+        return issues
+
 def check_field_compliance(field_name, series, standard):
     """检查单字段合规性，返回问题列表"""
     issues = []
+    
     # 类型检查
     std_type = FIELD_TYPE_MAP.get(str(standard.get('字段类型', '')).strip(), None)
     if std_type:
@@ -349,11 +556,61 @@ def check_field_compliance(field_name, series, standard):
         elif std_type == 'datetime' and not (str(series.dtype).startswith('datetime')):
             issues.append(f"类型不符，应为日期，实际为{series.dtype}")
     
-    # 必填检查
+    # 必填检查（简化版本，详细检查在check_required_fields_detailed中）
     if standard.get('必填') or str(standard.get('约束条件', '')).strip().upper() == 'O':
         null_count = series.isnull().sum()
         if null_count > 0:
             issues.append(f"必填字段存在空值，共{null_count}个")
+    
+    # 字段长度检查
+    if '字段长度' in standard and standard['字段长度']:
+        max_length = standard['字段长度']
+        if series.dtype == 'object':
+            # 检查文本字段长度
+            max_str_length = series.astype(str).str.len().max()
+            if max_str_length > max_length:
+                issues.append(f"字段长度超限，最大长度{max_str_length}，限制为{max_length}")
+    
+    # 数值范围检查（针对特定字段）
+    if std_type == 'float' or std_type == 'int':
+        if field_name in ['JZMDX', 'JZMDZ', 'JZXG', 'KGLSX', 'LDLSX', 'LDLLX', 'NJLJXZL', 'RJLSX', 'RJLXX', 'TCW', 'TSZPLTJZ', 'TSZPLZDJZ', 'XCSLDLTJZ', 'XCSLDLZDJZ']:
+            # 检查数值是否在合理范围内
+            non_null_values = series.dropna()
+            if len(non_null_values) > 0:
+                min_val = non_null_values.min()
+                max_val = non_null_values.max()
+                
+                # 根据字段类型设置合理范围
+                if field_name in ['JZMDX', 'JZMDZ']:  # 建筑密度
+                    if min_val < 0 or max_val > 100:
+                        issues.append(f"建筑密度值超出合理范围[0-100]，实际范围[{min_val}-{max_val}]")
+                elif field_name in ['JZXG']:  # 建筑限高
+                    if min_val < 0 or max_val > 1000:
+                        issues.append(f"建筑限高值超出合理范围[0-1000]，实际范围[{min_val}-{max_val}]")
+                elif field_name in ['KGLSX', 'LDLSX', 'LDLLX']:  # 绿地率
+                    if min_val < 0 or max_val > 100:
+                        issues.append(f"绿地率值超出合理范围[0-100]，实际范围[{min_val}-{max_val}]")
+                elif field_name in ['RJLSX', 'RJLXX']:  # 容积率
+                    if min_val < 0 or max_val > 50:
+                        issues.append(f"容积率值超出合理范围[0-50]，实际范围[{min_val}-{max_val}]")
+                elif field_name in ['TCW']:  # 停车位
+                    if min_val < 0:
+                        issues.append(f"停车位数量不能为负数，最小值{min_val}")
+    
+    # 编码格式检查
+    if std_type == 'object' and field_name in ['YSDM', 'DLBM', 'QSDWDM', 'ZLDWDM', 'ZLDJDM', 'PDJB', 'KCLX', 'KCDLBM', 'CGYDDM', 'YDXZDM', 'ZQCODE']:
+        # 检查编码字段是否包含非法字符
+        non_null_values = series.dropna().astype(str)
+        if len(non_null_values) > 0:
+            # 检查是否包含中文字符（编码字段通常不应包含中文）
+            chinese_chars = non_null_values.str.contains(r'[\u4e00-\u9fff]', na=False)
+            if chinese_chars.any():
+                issues.append(f"编码字段包含中文字符，可能影响数据规范性")
+            
+            # 检查是否包含特殊字符
+            special_chars = non_null_values.str.contains(r'[^\w\-\.]', na=False)
+            if special_chars.any():
+                issues.append(f"编码字段包含特殊字符，可能影响数据规范性")
     
     return issues
 
@@ -524,6 +781,174 @@ def check_unique_identifiers(dataframes):
                             'duplicate_count': count,
                             'file_index': file_index
                         })
+    
+    return issues
+
+def check_data_integrity(gdf):
+    """检查数据完整性"""
+    issues = []
+    
+    # 检查几何数据完整性
+    if not gdf.empty:
+        # 检查是否有空几何
+        null_geometries = gdf.geometry.isnull().sum()
+        if null_geometries > 0:
+            issues.append({
+                'type': '数据完整性',
+                'error': f'存在{null_geometries}个空几何对象'
+            })
+        
+        # 检查是否有空几何体
+        empty_geometries = gdf.geometry.apply(lambda x: x.is_empty if x is not None else False).sum()
+        if empty_geometries > 0:
+            issues.append({
+                'type': '数据完整性',
+                'error': f'存在{empty_geometries}个空几何体'
+            })
+    
+    return issues
+
+def check_logical_consistency(gdf):
+    """检查逻辑一致性"""
+    issues = []
+    
+    if not gdf.empty:
+        # 检查面积字段逻辑一致性
+        area_fields = ['TBMJ', 'JBNTMJ', 'XZDWMJ', 'LXDWMJ', 'TKMJ', 'YDMJ', 'ZMJ']
+        existing_area_fields = [field for field in area_fields if field in gdf.columns]
+        
+        if len(existing_area_fields) >= 2:
+            # 检查面积字段之间的逻辑关系
+            for i, field1 in enumerate(existing_area_fields):
+                for field2 in existing_area_fields[i+1:]:
+                    if field1 in gdf.columns and field2 in gdf.columns:
+                        # 检查是否有负面积
+                        neg_area1 = (gdf[field1] < 0).sum()
+                        neg_area2 = (gdf[field2] < 0).sum()
+                        
+                        if neg_area1 > 0:
+                            issues.append({
+                                'type': '逻辑一致性',
+                                'error': f'字段{field1}存在{neg_area1}个负面积值'
+                            })
+                        
+                        if neg_area2 > 0:
+                            issues.append({
+                                'type': '逻辑一致性',
+                                'error': f'字段{field2}存在{neg_area2}个负面积值'
+                            })
+        
+        # 检查编码字段格式一致性
+        code_fields = ['YSDM', 'DLBM', 'QSDWDM', 'ZLDWDM']
+        for field in code_fields:
+            if field in gdf.columns:
+                # 检查编码长度是否一致
+                non_null_codes = gdf[field].dropna().astype(str)
+                if len(non_null_codes) > 0:
+                    code_lengths = non_null_codes.str.len()
+                    if code_lengths.nunique() > 1:
+                        issues.append({
+                            'type': '逻辑一致性',
+                            'error': f'字段{field}编码长度不一致，长度范围[{code_lengths.min()}-{code_lengths.max()}]'
+                        })
+    
+    return issues
+
+def check_spatial_reference_consistency(gdf):
+    """检查空间参考一致性"""
+    issues = []
+    
+    if not gdf.empty and gdf.crs is not None:
+        try:
+            crs_string = gdf.crs.to_string()
+            
+            # 检查是否为常用坐标系
+            common_crs = [
+                'EPSG:4326',  # WGS84
+                'EPSG:3857',  # Web Mercator
+                'EPSG:4490',  # CGCS2000
+                'EPSG:4547',  # CGCS2000 / 3-degree Gauss-Kruger zone 39
+                'EPSG:4548',  # CGCS2000 / 3-degree Gauss-Kruger zone 40
+                'EPSG:4549',  # CGCS2000 / 3-degree Gauss-Kruger zone 41
+                'EPSG:4550',  # CGCS2000 / 3-degree Gauss-Kruger zone 42
+                'EPSG:4551',  # CGCS2000 / 3-degree Gauss-Kruger zone 43
+                'EPSG:4552',  # CGCS2000 / 3-degree Gauss-Kruger zone 44
+                'EPSG:4553',  # CGCS2000 / 3-degree Gauss-Kruger zone 45
+            ]
+            
+            if not any(crs in crs_string for crs in common_crs):
+                issues.append({
+                    'type': '空间参考一致性',
+                    'error': f'使用了非标准坐标系: {crs_string}'
+                })
+            
+            # 检查坐标范围是否合理
+            bounds = gdf.total_bounds
+            if bounds is not None:
+                min_x, min_y, max_x, max_y = bounds
+                
+                # 检查是否在中国范围内（大致范围）
+                if not (73 <= min_x <= 135 and 18 <= min_y <= 54):
+                    issues.append({
+                        'type': '空间参考一致性',
+                        'error': f'坐标范围超出中国范围，当前范围: X[{min_x:.6f}-{max_x:.6f}], Y[{min_y:.6f}-{max_y:.6f}]'
+                    })
+                
+                # 检查坐标精度
+                if abs(max_x - min_x) < 0.000001 or abs(max_y - min_y) < 0.000001:
+                    issues.append({
+                        'type': '空间参考一致性',
+                        'error': '坐标范围过小，可能存在坐标精度问题'
+                    })
+        
+        except Exception as e:
+            issues.append({
+                'type': '空间参考一致性',
+                'error': f'坐标系统检查失败: {str(e)}'
+            })
+    
+    return issues
+
+def check_field_value_consistency(gdf):
+    """检查字段值一致性"""
+    issues = []
+    
+    if not gdf.empty:
+        # 检查地类编码与地类名称的一致性
+        if 'DLBM' in gdf.columns and 'DLMC' in gdf.columns:
+            # 检查是否有地类编码但无地类名称的情况
+            has_code_no_name = ((gdf['DLBM'].notna()) & (gdf['DLMC'].isna())).sum()
+            if has_code_no_name > 0:
+                issues.append({
+                    'type': '字段值一致性',
+                    'error': f'存在{has_code_no_name}条记录有地类编码但无地类名称'
+                })
+            
+            # 检查是否有地类名称但无地类编码的情况
+            has_name_no_code = ((gdf['DLMC'].notna()) & (gdf['DLBM'].isna())).sum()
+            if has_name_no_code > 0:
+                issues.append({
+                    'type': '字段值一致性',
+                    'error': f'存在{has_name_no_code}条记录有地类名称但无地类编码'
+                })
+        
+        # 检查权属单位代码与名称的一致性
+        if 'QSDWDM' in gdf.columns and 'QSDWMC' in gdf.columns:
+            has_code_no_name = ((gdf['QSDWDM'].notna()) & (gdf['QSDWMC'].isna())).sum()
+            if has_code_no_name > 0:
+                issues.append({
+                    'type': '字段值一致性',
+                    'error': f'存在{has_code_no_name}条记录有权属单位代码但无单位名称'
+                })
+        
+        # 检查坐落单位代码与名称的一致性
+        if 'ZLDWDM' in gdf.columns and 'ZLDWMC' in gdf.columns:
+            has_code_no_name = ((gdf['ZLDWDM'].notna()) & (gdf['ZLDWMC'].isna())).sum()
+            if has_code_no_name > 0:
+                issues.append({
+                    'type': '字段值一致性',
+                    'error': f'存在{has_code_no_name}条记录有坐落单位代码但无单位名称'
+                })
     
     return issues
 
@@ -714,8 +1139,10 @@ class GeoDataInspector:
                 # 几何检查（大文件只检查部分）
                 if len(gdf) > chunk_size:
                     sample_geometries = gdf.geometry.head(chunk_size).tolist()
+                    sample_gdf = gdf.head(chunk_size)
                 else:
                     sample_geometries = gdf.geometry.tolist()
+                    sample_gdf = gdf
                 
                 geom_issues = check_geometry_validity(sample_geometries)
                 if geom_issues:
@@ -724,6 +1151,52 @@ class GeoDataInspector:
                         'file': str(shp_path),
                         'issue': issue
                     } for issue in geom_issues])
+                
+                # 四、新增检查标准
+                # 1. 数据完整性检查
+                integrity_issues = check_data_integrity(sample_gdf)
+                if integrity_issues:
+                    result['basic_issues'].extend(integrity_issues)
+                    self.results['basic_issues'].extend([{
+                        'file': str(shp_path),
+                        'issue': issue
+                    } for issue in integrity_issues])
+                
+                # 2. 逻辑一致性检查
+                logic_issues = check_logical_consistency(sample_gdf)
+                if logic_issues:
+                    result['attribute_issues'].extend(logic_issues)
+                    self.results['attribute_issues'].extend([{
+                        'file': str(shp_path),
+                        'issue': issue
+                    } for issue in logic_issues])
+                
+                # 3. 空间参考一致性检查
+                spatial_issues = check_spatial_reference_consistency(sample_gdf)
+                if spatial_issues:
+                    result['basic_issues'].extend(spatial_issues)
+                    self.results['basic_issues'].extend([{
+                        'file': str(shp_path),
+                        'issue': issue
+                    } for issue in spatial_issues])
+                
+                # 4. 字段值一致性检查
+                value_consistency_issues = check_field_value_consistency(sample_gdf)
+                if value_consistency_issues:
+                    result['attribute_issues'].extend(value_consistency_issues)
+                    self.results['attribute_issues'].extend([{
+                        'file': str(shp_path),
+                        'issue': issue
+                    } for issue in value_consistency_issues])
+                
+                # 5. 详细必填字段检查
+                required_field_issues = check_required_fields_detailed(sample_gdf, self.field_standards, shp_path.name)
+                if required_field_issues:
+                    result['attribute_issues'].extend(required_field_issues)
+                    self.results['attribute_issues'].extend([{
+                        'file': str(shp_path),
+                        'issue': issue
+                    } for issue in required_field_issues])
             
             # 获取字段信息（大文件优化）
             if hasattr(gdf, 'columns'):
@@ -965,6 +1438,33 @@ class GeoDataInspector:
                         crs_issues = check_coordinate_system(layers[0])
                         if crs_issues:
                             result['basic_issues'].extend(crs_issues)
+                
+                # 新增检查标准 - 对每个图层进行检查
+                for i, layer in enumerate(layers):
+                    # 1. 数据完整性检查
+                    integrity_issues = check_data_integrity(layer)
+                    if integrity_issues:
+                        result['basic_issues'].extend(integrity_issues)
+                    
+                    # 2. 逻辑一致性检查
+                    logic_issues = check_logical_consistency(layer)
+                    if logic_issues:
+                        result['attribute_issues'].extend(logic_issues)
+                    
+                    # 3. 空间参考一致性检查
+                    spatial_issues = check_spatial_reference_consistency(layer)
+                    if spatial_issues:
+                        result['basic_issues'].extend(spatial_issues)
+                    
+                    # 4. 字段值一致性检查
+                    value_consistency_issues = check_field_value_consistency(layer)
+                    if value_consistency_issues:
+                        result['attribute_issues'].extend(value_consistency_issues)
+                    
+                    # 5. 详细必填字段检查
+                    required_field_issues = check_required_fields_detailed(layer, self.field_standards, gdb_path.name)
+                    if required_field_issues:
+                        result['attribute_issues'].extend(required_field_issues)
                 
             except Exception as e:
                 result['error'] = f"无法读取GDB文件: {str(e)}"
