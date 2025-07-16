@@ -527,8 +527,8 @@ def check_unique_identifiers(dataframes):
     
     return issues
 
-class SHPFieldChecker:
-    """SHP文件字段检查器"""
+class GeoDataInspector:
+    """地理数据质检器"""
     
     def __init__(self, input_dir: str, output_dir: Optional[str] = None, field_config_manager=None):
         """
@@ -1180,7 +1180,7 @@ class SHPFieldChecker:
                     compliance_df.to_excel(writer, sheet_name='字段合规性', index=False)
         
         elif format == 'word':
-            filename = f"SHP字段检查报告_{timestamp}.docx"
+            filename = f"地理数据质检报告_{timestamp}.docx"
             filepath = self.output_dir / filename
             self._generate_word_report(filepath)
         
@@ -1199,7 +1199,7 @@ class SHPFieldChecker:
             section.right_margin = Inches(1)
         
         # 标题
-        title = doc.add_heading('SHP文件字段合规性检查报告', 0)
+        title = doc.add_heading('地理数据质检报告', 0)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         # 报告信息
@@ -1447,12 +1447,12 @@ class SHPFieldChecker:
 
 # FieldConfigDialog 类已移除，现在使用 PandasTable 版本
 
-class SHPFieldCheckerGUI:
-    """SHP字段检查器GUI界面"""
+class GeoDataInspectorGUI:
+    """地理数据质检器GUI界面"""
     
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("地理空间文件字段检查工具 v2.0")
+        self.root.title("地理数据质检工具 v2.0")
         self.root.geometry("1400x900")
         
         # 配置系统字体
@@ -1501,7 +1501,7 @@ class SHPFieldCheckerGUI:
         title_frame = ttk.Frame(main_frame)
         title_frame.pack(fill=tk.X, pady=(0, 20))
         
-        title_label = ttk.Label(title_frame, text="SHP字段检查工具", 
+        title_label = ttk.Label(title_frame, text="地理数据质检工具", 
                                font=("TkDefaultFont", 18, "bold"), foreground="#2E86AB")
         title_label.pack(side=tk.LEFT)
         
@@ -1737,7 +1737,7 @@ class SHPFieldCheckerGUI:
         def run_check():
             try:
                 logger.info(f"开始检查目录: {input_dir}")
-                self.checker = SHPFieldChecker(input_dir, output_dir, self.field_config_manager)
+                self.checker = GeoDataInspector(input_dir, output_dir, self.field_config_manager)
                 self.results = self.checker.run_check(progress_callback=self.update_progress)
                 
                 # 在主线程中更新UI
@@ -2083,7 +2083,7 @@ DBF文件数量: {summary['dbf_files']}
 
 def main():
     """主函数"""
-    app = SHPFieldCheckerGUI()
+    app = GeoDataInspectorGUI()
     app.run()
 
 if __name__ == "__main__":
