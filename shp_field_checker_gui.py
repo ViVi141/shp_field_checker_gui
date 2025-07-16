@@ -2276,7 +2276,10 @@ class GeoDataInspectorGUI:
                     for field in file_result.get('fields', []):
                         compliance_issues = field.get('compliance_issues', [])
                         if isinstance(compliance_issues, list) and compliance_issues:
-                            field_compliance_issues.extend(compliance_issues)
+                            # 确保所有元素都是字符串
+                            for issue in compliance_issues:
+                                if isinstance(issue, str):
+                                    field_compliance_issues.append(issue)
             
             if error_files == 0 and not field_compliance_issues:
                 messagebox.showinfo("完成", f"检查完成！\n\n共检查 {total_files} 个文件\n没有发现错误")
@@ -2358,53 +2361,23 @@ DBF文件数量: {summary['dbf_files']}
         self.detail_text.delete(1.0, tk.END)
         self.detail_text.insert(1.0, detail_text)
         
-        # 更新错误信息
-        error_text = "错误信息\n" + "="*50 + "\n\n"
+        # 优化错误信息显示
+        self.update_error_display(files)
+    
+    def update_error_display(self, files):
+        """优化错误信息显示"""
+        error_text = "错误信息分类\n" + "="*50 + "\n\n"
         
-        # 原有错误
-        errors = self.results.get('errors', []) if self.results and isinstance(self.results, dict) else []
-        if errors:
-            error_text += "文件读取错误:\n"
-            for error in errors:
-                error_text += f"  文件: {Path(error['file']).name}\n"
-                error_text += f"  错误: {error['error']}\n"
-                error_text += f"  级别: {error.get('level', '未知')}\n"
-                error_text += f"  类型: {error.get('type', '未知')}\n\n"
+        # 收集所有错误信息
+        critical_errors = []  # 不可忽略错误
+        ignorable_errors = []  # 可忽略错误
+        field_edit_info = {}  # 按字段分组的编辑信息
         
-        # 拓扑问题
-        topology_issues = self.results.get('topology_issues', []) if self.results else []
-        if topology_issues and isinstance(topology_issues, list):
-            error_text += "拓扑问题:\n"
-            for issue in topology_issues:
-                if isinstance(issue, dict):
-                    error_text += f"  文件: {Path(str(issue.get('file', ''))).name}\n"
-                    error_text += f"  问题: {str(issue.get('issue', ''))}\n\n"
-        
-        # 属性问题
-        attribute_issues = self.results.get('attribute_issues', []) if self.results else []
-        if attribute_issues and isinstance(attribute_issues, list):
-            error_text += "属性问题:\n"
-            for issue in attribute_issues:
-                if isinstance(issue, dict):
-                    error_text += f"  文件: {str(issue.get('file', ''))}\n"
-                    error_text += f"  问题: {str(issue.get('issue', ''))}\n\n"
-        
-        # 基础问题
-        basic_issues = self.results.get('basic_issues', []) if self.results else []
-        if basic_issues and isinstance(basic_issues, list):
-            error_text += "基础问题:\n"
-            for issue in basic_issues:
-                if isinstance(issue, dict):
-                    error_text += f"  文件: {Path(str(issue.get('file', ''))).name}\n"
-                    error_text += f"  问题: {str(issue.get('issue', ''))}\n\n"
-        
-        # 检查字段合规性问题（详细显示）
-        field_compliance_issues = []
-        field_edit_info = []  # 存储编辑信息
-        
+        # 处理字段合规性问题
         for file_result in files:
             file_name = file_result.get('file_name', '')
             file_path = file_result.get('file_path', '')
+            
             # GDB多图层
             if file_result.get('layers'):
                 for layer in file_result['layers']:
@@ -2412,60 +2385,192 @@ DBF文件数量: {summary['dbf_files']}
                     for field in layer.get('fields', []):
                         compliance_issues = field.get('compliance_issues', [])
                         if isinstance(compliance_issues, list) and compliance_issues:
+                            field_name = field['name']
+                            field_key = f"{file_name}_{layer_name}_{field_name}"
+                            
+                            # 确定错误等级
+                            error_level = get_field_error_level(field_name, file_name)
+                            
+                            # 简化错误信息
+                            simplified_issues = []
                             for issue in compliance_issues:
-                                field_compliance_issues.append(
-                                    f"文件: {file_name} 图层: {layer_name} 字段: {field['name']} 合规性问题: {issue} "
-                                    f"(空值数量: {field.get('null_count', 'N/A')}, 唯一值数量: {field.get('unique_count', 'N/A')})"
-                                )
-                                # 存储编辑信息
-                                field_edit_info.append({
+                                if "必填字段" in issue:
+                                    simplified_issues.append("必填字段为空")
+                                elif "字段类型" in issue:
+                                    simplified_issues.append("字段类型不匹配")
+                                elif "字段长度" in issue:
+                                    simplified_issues.append("字段长度超限")
+                                elif "数值范围" in issue:
+                                    simplified_issues.append("数值范围异常")
+                                elif "编码格式" in issue:
+                                    simplified_issues.append("编码格式错误")
+                                elif "数据完整性" in issue:
+                                    simplified_issues.append("数据不完整")
+                                elif "逻辑一致性" in issue:
+                                    simplified_issues.append("逻辑不一致")
+                                elif "空间参考" in issue:
+                                    simplified_issues.append("空间参考不一致")
+                                elif "字段值一致性" in issue:
+                                    simplified_issues.append("字段值不一致")
+                                else:
+                                    simplified_issues.append(issue)
+                            
+                            error_info = {
+                                'file_name': file_name,
+                                'layer_name': layer_name,
+                                'field_name': field_name,
+                                'issues': simplified_issues,
+                                'null_count': field.get('null_count', 0),
+                                'unique_count': field.get('unique_count', 0),
+                                'level': error_level
+                            }
+                            
+                            if error_level == ERROR_LEVELS['CRITICAL']:
+                                critical_errors.append(error_info)
+                            else:
+                                ignorable_errors.append(error_info)
+                            
+                            # 存储编辑信息（按字段分组）
+                            if field_key not in field_edit_info:
+                                field_edit_info[field_key] = {
                                     'file_path': file_path,
-                                    'field_name': field['name'],
+                                    'field_name': field_name,
                                     'layer_name': layer_name,
-                                    'issue': issue
-                                })
+                                    'issues': simplified_issues,
+                                    'level': error_level
+                                }
+            
             # 普通SHP/DBF
             else:
                 for field in file_result.get('fields', []):
                     compliance_issues = field.get('compliance_issues', [])
                     if isinstance(compliance_issues, list) and compliance_issues:
+                        field_name = field['name']
+                        field_key = f"{file_name}_{field_name}"
+                        
+                        # 确定错误等级
+                        error_level = get_field_error_level(field_name, file_name)
+                        
+                        # 简化错误信息
+                        simplified_issues = []
                         for issue in compliance_issues:
-                            field_compliance_issues.append(
-                                f"文件: {file_name} 字段: {field['name']} 合规性问题: {issue} "
-                                f"(空值数量: {field.get('null_count', 'N/A')}, 唯一值数量: {field.get('unique_count', 'N/A')})"
-                            )
-                            # 存储编辑信息
-                            field_edit_info.append({
+                            if "必填字段" in issue:
+                                simplified_issues.append("必填字段为空")
+                            elif "字段类型" in issue:
+                                simplified_issues.append("字段类型不匹配")
+                            elif "字段长度" in issue:
+                                simplified_issues.append("字段长度超限")
+                            elif "数值范围" in issue:
+                                simplified_issues.append("数值范围异常")
+                            elif "编码格式" in issue:
+                                simplified_issues.append("编码格式错误")
+                            elif "数据完整性" in issue:
+                                simplified_issues.append("数据不完整")
+                            elif "逻辑一致性" in issue:
+                                simplified_issues.append("逻辑不一致")
+                            elif "空间参考" in issue:
+                                simplified_issues.append("空间参考不一致")
+                            elif "字段值一致性" in issue:
+                                simplified_issues.append("字段值不一致")
+                            else:
+                                simplified_issues.append(issue)
+                        
+                        error_info = {
+                            'file_name': file_name,
+                            'field_name': field_name,
+                            'issues': simplified_issues,
+                            'null_count': field.get('null_count', 0),
+                            'unique_count': field.get('unique_count', 0),
+                            'level': error_level
+                        }
+                        
+                        if error_level == ERROR_LEVELS['CRITICAL']:
+                            critical_errors.append(error_info)
+                        else:
+                            ignorable_errors.append(error_info)
+                        
+                        # 存储编辑信息（按字段分组）
+                        if field_key not in field_edit_info:
+                            field_edit_info[field_key] = {
                                 'file_path': file_path,
-                                'field_name': field['name'],
+                                'field_name': field_name,
                                 'layer_name': None,
-                                'issue': issue
-                            })
+                                'issues': simplified_issues,
+                                'level': error_level
+                            }
         
-        if not any([errors, topology_issues, attribute_issues, basic_issues, field_compliance_issues]):
-            error_text += "没有发现错误。\n"
-        else:
-            if field_compliance_issues:
-                error_text += "字段合规性问题:\n"
-                for i, issue in enumerate(field_compliance_issues):
-                    error_text += f"  {issue}\n"
-                error_text += "\n"
-                
-                # 添加编辑按钮
-                if field_edit_info:
-                    error_text += "点击下方按钮编辑字段:\n"
-                    for i, edit_info in enumerate(field_edit_info):
-                        error_text += f"  [编辑{i+1}] {edit_info['field_name']} - {edit_info['issue']}\n"
-                error_text += "\n"
+        # 显示不可忽略错误
+        if critical_errors:
+            error_text += "🚨 不可忽略错误 (必须修复):\n"
+            error_text += "-" * 30 + "\n"
+            for error in critical_errors:
+                error_text += f"📁 {error['file_name']}"
+                if error.get('layer_name'):
+                    error_text += f" (图层: {error['layer_name']})"
+                error_text += f"\n  字段: {error['field_name']}\n"
+                error_text += f"  问题: {', '.join(error['issues'])}\n"
+                error_text += f"  空值: {error['null_count']}, 唯一值: {error['unique_count']}\n\n"
+        
+        # 显示可忽略错误
+        if ignorable_errors:
+            error_text += "⚠️ 可忽略错误 (建议修复):\n"
+            error_text += "-" * 30 + "\n"
+            for error in ignorable_errors:
+                error_text += f"📁 {error['file_name']}"
+                if error.get('layer_name'):
+                    error_text += f" (图层: {error['layer_name']})"
+                error_text += f"\n  字段: {error['field_name']}\n"
+                error_text += f"  问题: {', '.join(error['issues'])}\n"
+                error_text += f"  空值: {error['null_count']}, 唯一值: {error['unique_count']}\n\n"
+        
+        # 处理其他错误类型
+        errors = self.results.get('errors', []) if self.results and isinstance(self.results, dict) else []
+        topology_issues = self.results.get('topology_issues', []) if self.results else []
+        attribute_issues = self.results.get('attribute_issues', []) if self.results else []
+        basic_issues = self.results.get('basic_issues', []) if self.results else []
+        
+        if errors:
+            error_text += "🚨 文件读取错误:\n"
+            error_text += "-" * 30 + "\n"
+            for error in errors:
+                error_text += f"📁 {Path(error['file']).name}\n"
+                error_text += f"  错误: {error['error']}\n\n"
+        
+        if topology_issues and isinstance(topology_issues, list):
+            error_text += "⚠️ 拓扑问题:\n"
+            error_text += "-" * 30 + "\n"
+            for issue in topology_issues:
+                if isinstance(issue, dict):
+                    error_text += f"📁 {Path(str(issue.get('file', ''))).name}\n"
+                    error_text += f"  问题: {str(issue.get('issue', ''))}\n\n"
+        
+        if attribute_issues and isinstance(attribute_issues, list):
+            error_text += "⚠️ 属性问题:\n"
+            error_text += "-" * 30 + "\n"
+            for issue in attribute_issues:
+                if isinstance(issue, dict):
+                    error_text += f"📁 {str(issue.get('file', ''))}\n"
+                    error_text += f"  问题: {str(issue.get('issue', ''))}\n\n"
+        
+        if basic_issues and isinstance(basic_issues, list):
+            error_text += "⚠️ 基础问题:\n"
+            error_text += "-" * 30 + "\n"
+            for issue in basic_issues:
+                if isinstance(issue, dict):
+                    error_text += f"📁 {Path(str(issue.get('file', ''))).name}\n"
+                    error_text += f"  问题: {str(issue.get('issue', ''))}\n\n"
+        
+        if not any([critical_errors, ignorable_errors, errors, topology_issues, attribute_issues, basic_issues]):
+            error_text += "✅ 没有发现错误。\n"
         
         self.error_text.delete(1.0, tk.END)
         self.error_text.insert(1.0, error_text)
         
-        # 创建编辑按钮
-        self.create_edit_buttons(field_edit_info)
+        # 创建优化的编辑按钮
+        self.create_optimized_edit_buttons(field_edit_info)
     
-    def create_edit_buttons(self, field_edit_info):
-        """创建编辑按钮"""
+    def create_optimized_edit_buttons(self, field_edit_info):
+        """创建优化的编辑按钮"""
         # 清空现有按钮
         for widget in self.edit_buttons_frame.winfo_children():
             widget.destroy()
@@ -2473,21 +2578,50 @@ DBF文件数量: {summary['dbf_files']}
         if not field_edit_info or FieldEditorDialog is None:
             return
         
-        # 创建按钮标题
-        ttk.Label(self.edit_buttons_frame, text="字段编辑:", font=("Arial", 9, "bold")).pack(anchor=tk.W)
+        # 按错误等级分组
+        critical_fields = []
+        ignorable_fields = []
         
-        # 创建按钮容器
-        buttons_container = ttk.Frame(self.edit_buttons_frame)
-        buttons_container.pack(fill=tk.X, pady=5)
+        for field_key, edit_info in field_edit_info.items():
+            if edit_info['level'] == ERROR_LEVELS['CRITICAL']:
+                critical_fields.append((field_key, edit_info))
+            else:
+                ignorable_fields.append((field_key, edit_info))
         
-        # 为每个字段创建编辑按钮
-        for i, edit_info in enumerate(field_edit_info):
-            button_text = f"编辑{i+1}: {edit_info['field_name']}"
+        # 创建不可忽略错误编辑按钮
+        if critical_fields:
+            critical_frame = ttk.LabelFrame(self.edit_buttons_frame, text="🚨 不可忽略错误字段编辑", padding="5")
+            critical_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            critical_buttons_frame = ttk.Frame(critical_frame)
+            critical_buttons_frame.pack(fill=tk.X)
+            
+            for field_key, edit_info in critical_fields:
+                button_text = f"编辑 {edit_info['field_name']}"
             if edit_info['layer_name']:
                 button_text += f" ({edit_info['layer_name']})"
             
-            btn = ttk.Button(buttons_container, text=button_text, 
-                           command=lambda info=edit_info: self.open_field_editor(info))
+                btn = ttk.Button(critical_buttons_frame, text=button_text, 
+                               command=lambda info=edit_info: self.open_field_editor(info),
+                               style='Critical.TButton')
+                btn.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # 创建可忽略错误编辑按钮
+        if ignorable_fields:
+            ignorable_frame = ttk.LabelFrame(self.edit_buttons_frame, text="⚠️ 可忽略错误字段编辑", padding="5")
+            ignorable_frame.pack(fill=tk.X)
+            
+            ignorable_buttons_frame = ttk.Frame(ignorable_frame)
+            ignorable_buttons_frame.pack(fill=tk.X)
+            
+            for field_key, edit_info in ignorable_fields:
+                button_text = f"编辑 {edit_info['field_name']}"
+                if edit_info['layer_name']:
+                    button_text += f" ({edit_info['layer_name']})"
+                
+                btn = ttk.Button(ignorable_buttons_frame, text=button_text, 
+                               command=lambda info=edit_info: self.open_field_editor(info),
+                               style='Ignorable.TButton')
             btn.pack(side=tk.LEFT, padx=5, pady=2)
     
     def open_field_editor(self, edit_info):
