@@ -164,9 +164,20 @@ class FieldEditorDialog:
         toolbar_frame = ttk.Frame(right_panel)
         toolbar_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Button(toolbar_frame, text="保存修改", command=self.save_changes).pack(side=tk.LEFT, padx=5)
-        ttk.Button(toolbar_frame, text="撤销修改", command=self.revert_changes).pack(side=tk.LEFT, padx=5)
-        ttk.Button(toolbar_frame, text="关闭", command=self.dialog.destroy).pack(side=tk.RIGHT, padx=5)
+        # 绑定快捷键
+        self.dialog.bind('<Control-s>', lambda e: self.save_changes())
+        self.dialog.bind('<Control-z>', lambda e: self.revert_changes())
+        self.dialog.bind('<Control-q>', lambda e: self.dialog.destroy())
+        self.dialog.bind('<Control-r>', lambda e: self.quick_fix())
+        self.dialog.bind('<F5>', lambda e: self.refresh_data())
+        
+        # 添加快捷键提示到按钮
+        ttk.Button(toolbar_frame, text="保存修改 (Ctrl+S)", command=self.save_changes).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar_frame, text="撤销修改 (Ctrl+Z)", command=self.revert_changes).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar_frame, text="关闭 (Ctrl+Q)", command=self.dialog.destroy).pack(side=tk.RIGHT, padx=5)
+        
+        # 添加导出按钮到工具栏
+        ttk.Button(toolbar_frame, text="导出数据", command=self.show_export_dialog).pack(side=tk.LEFT, padx=5)
         
         # 创建表格
         self.create_table(right_panel)
@@ -1400,8 +1411,129 @@ class FieldEditorDialog:
         self.context_menu.add_command(label="复制值", command=self.copy_value)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="一键修复", command=self.quick_fix)
-        self.context_menu.add_command(label="批量编辑选中项", command=self.batch_edit_selected)
-        self.context_menu.add_command(label="验证选中项", command=self.validate_selected) 
+        
+        # 添加批量操作子菜单
+        batch_menu = tk.Menu(self.context_menu, tearoff=0)
+        self.context_menu.add_cascade(label="批量操作", menu=batch_menu)
+        
+        batch_menu.add_command(label="批量编辑", command=self.batch_edit_selected)
+        batch_menu.add_command(label="批量验证", command=self.validate_selected)
+        batch_menu.add_command(label="批量大写", command=lambda: self.batch_transform('upper'))
+        batch_menu.add_command(label="批量小写", command=lambda: self.batch_transform('lower'))
+        batch_menu.add_command(label="批量去空格", command=lambda: self.batch_transform('strip'))
+        batch_menu.add_command(label="批量替换", command=self.batch_replace)
+
+    def batch_transform(self, transform_type):
+        """批量转换"""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("警告", "请先选择要处理的项")
+            return
+        
+        count = 0
+        for item in selected:
+            value = self.tree.item(item)['values'][1]
+            if pd.isna(value) or value == "":
+                continue
+                
+            if transform_type == 'upper':
+                new_value = str(value).upper()
+            elif transform_type == 'lower':
+                new_value = str(value).lower()
+            elif transform_type == 'strip':
+                new_value = str(value).strip()
+            
+            if new_value != value:
+                self.tree.set(item, 'value', new_value)
+                count += 1
+        
+        if count > 0:
+            self.update_statistics()
+            self.status_var.set(f"已处理 {count} 个值")
+
+    def batch_replace(self):
+        """批量替换对话框"""
+        dialog = tk.Toplevel(self.dialog)
+        dialog.title("批量替换")
+        dialog.geometry("400x200")
+        dialog.transient(self.dialog)
+        dialog.grab_set()
+        
+        # 居中显示
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (400 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (200 // 2)
+        dialog.geometry(f"400x200+{x}+{y}")
+        
+        # 查找和替换输入框
+        input_frame = ttk.Frame(dialog)
+        input_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Label(input_frame, text="查找:").grid(row=0, column=0, sticky='w', pady=5)
+        find_var = tk.StringVar()
+        ttk.Entry(input_frame, textvariable=find_var).grid(row=0, column=1, sticky='ew', padx=5)
+        
+        ttk.Label(input_frame, text="替换为:").grid(row=1, column=0, sticky='w', pady=5)
+        replace_var = tk.StringVar()
+        ttk.Entry(input_frame, textvariable=replace_var).grid(row=1, column=1, sticky='ew', padx=5)
+        
+        input_frame.grid_columnconfigure(1, weight=1)
+        
+        # 选项
+        options_frame = ttk.Frame(dialog)
+        options_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        case_sensitive_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options_frame, text="区分大小写", variable=case_sensitive_var).pack(side=tk.LEFT)
+        
+        whole_word_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options_frame, text="全字匹配", variable=whole_word_var).pack(side=tk.LEFT, padx=10)
+        
+        def do_replace():
+            find_text = find_var.get()
+            replace_text = replace_var.get()
+            
+            if not find_text:
+                messagebox.showwarning("警告", "请输入要查找的文本")
+                return
+            
+            selected = self.tree.selection()
+            if not selected:
+                messagebox.showwarning("警告", "请先选择要处理的项")
+                return
+            
+            count = 0
+            for item in selected:
+                value = str(self.tree.item(item)['values'][1])
+                if pd.isna(value) or value == "":
+                    continue
+                
+                if not case_sensitive_var.get():
+                    pattern = re.compile(re.escape(find_text), re.IGNORECASE)
+                else:
+                    pattern = re.compile(re.escape(find_text))
+                
+                if whole_word_var.get():
+                    pattern = re.compile(r'\b' + re.escape(find_text) + r'\b', 
+                                      re.IGNORECASE if not case_sensitive_var.get() else 0)
+                
+                new_value = pattern.sub(replace_text, value)
+                if new_value != value:
+                    self.tree.set(item, 'value', new_value)
+                    count += 1
+            
+            if count > 0:
+                self.update_statistics()
+                self.status_var.set(f"已替换 {count} 处")
+                dialog.destroy()
+            else:
+                messagebox.showinfo("提示", "未找到匹配项")
+        
+        # 按钮
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        ttk.Button(button_frame, text="替换", command=do_replace).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="取消", command=dialog.destroy).pack(side=tk.RIGHT, padx=5) 
 
     def get_field_standards(self):
         """获取字段标准信息"""
@@ -1410,3 +1542,143 @@ class FieldEditorDialog:
             return DEFAULT_FIELD_STANDARDS.get(self.field_name, {})
         except ImportError:
             return {} 
+
+    def refresh_data(self, event=None):
+        """刷新数据"""
+        try:
+            self.load_data()
+            self.status_var.set("数据已刷新")
+        except Exception as e:
+            logger.error(f"刷新数据时出错: {e}")
+            messagebox.showerror("错误", "刷新数据失败") 
+
+    def show_export_dialog(self):
+        """显示导出选项对话框"""
+        dialog = tk.Toplevel(self.dialog)
+        dialog.title("导出数据")
+        dialog.geometry("400x300")
+        dialog.transient(self.dialog)
+        dialog.grab_set()
+        
+        # 居中显示
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (400 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (300 // 2)
+        dialog.geometry(f"400x300+{x}+{y}")
+        
+        # 导出选项
+        options_frame = ttk.LabelFrame(dialog, text="导出选项")
+        options_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        # 导出格式
+        format_frame = ttk.Frame(options_frame)
+        format_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Label(format_frame, text="导出格式:").pack(side=tk.LEFT)
+        format_var = tk.StringVar(value="csv")
+        ttk.Radiobutton(format_frame, text="CSV", variable=format_var, value="csv").pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(format_frame, text="Excel", variable=format_var, value="excel").pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(format_frame, text="JSON", variable=format_var, value="json").pack(side=tk.LEFT, padx=10)
+        
+        # 导出范围
+        range_frame = ttk.Frame(options_frame)
+        range_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Label(range_frame, text="导出范围:").pack(side=tk.LEFT)
+        range_var = tk.StringVar(value="all")
+        ttk.Radiobutton(range_frame, text="全部", variable=range_var, value="all").pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(range_frame, text="选中项", variable=range_var, value="selected").pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(range_frame, text="非空值", variable=range_var, value="non_null").pack(side=tk.LEFT, padx=10)
+        
+        # 包含列
+        columns_frame = ttk.Frame(options_frame)
+        columns_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Label(columns_frame, text="包含列:").pack(side=tk.LEFT)
+        include_index_var = tk.BooleanVar(value=True)
+        include_validation_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(columns_frame, text="序号", variable=include_index_var).pack(side=tk.LEFT, padx=10)
+        ttk.Checkbutton(columns_frame, text="验证状态", variable=include_validation_var).pack(side=tk.LEFT, padx=10)
+        
+        # 其他选项
+        other_frame = ttk.Frame(options_frame)
+        other_frame.pack(fill=tk.X, padx=5, pady=5)
+        include_header_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(other_frame, text="包含表头", variable=include_header_var).pack(side=tk.LEFT, padx=10)
+        
+        def do_export():
+            try:
+                # 获取要导出的数据
+                data = []
+                if range_var.get() == "all":
+                    items = self.tree.get_children()
+                elif range_var.get() == "selected":
+                    items = self.tree.selection()
+                else:  # non_null
+                    items = [item for item in self.tree.get_children()
+                            if self.tree.item(item)['values'][2] == '否']
+                
+                # 构建列
+                columns = []
+                if include_index_var.get():
+                    columns.append("序号")
+                columns.append("字段值")
+                columns.append("是否为空")
+                if include_validation_var.get():
+                    columns.append("验证状态")
+                
+                # 收集数据
+                for item in items:
+                    values = self.tree.item(item)['values']
+                    row = {}
+                    if include_index_var.get():
+                        row["序号"] = values[0]
+                    row["字段值"] = values[1]
+                    row["是否为空"] = values[2]
+                    if include_validation_var.get() and len(values) > 3:
+                        row["验证状态"] = values[3]
+                    data.append(row)
+                
+                # 选择保存路径
+                file_types = {
+                    "csv": ("CSV文件", "*.csv"),
+                    "excel": ("Excel文件", "*.xlsx"),
+                    "json": ("JSON文件", "*.json")
+                }
+                file_type = file_types[format_var.get()]
+                file_path = filedialog.asksaveasfilename(
+                    defaultextension=f".{format_var.get()}",
+                    filetypes=[file_type, ("所有文件", "*.*")]
+                )
+                
+                if not file_path:
+                    return
+                
+                # 导出数据
+                if format_var.get() == "csv":
+                    with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
+                        writer = csv.DictWriter(f, fieldnames=columns)
+                        if include_header_var.get():
+                            writer.writeheader()
+                        writer.writerows(data)
+                
+                elif format_var.get() == "excel":
+                    df = pd.DataFrame(data)
+                    if not include_header_var.get():
+                        df.to_excel(file_path, index=False, header=False)
+                    else:
+                        df.to_excel(file_path, index=False)
+                
+                else:  # json
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                
+                messagebox.showinfo("成功", "数据导出完成")
+                dialog.destroy()
+                
+            except Exception as e:
+                logger.error(f"导出数据时出错: {e}")
+                messagebox.showerror("错误", f"导出失败: {str(e)}")
+        
+        # 按钮
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        ttk.Button(button_frame, text="导出", command=do_export).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="取消", command=dialog.destroy).pack(side=tk.RIGHT, padx=5) 
