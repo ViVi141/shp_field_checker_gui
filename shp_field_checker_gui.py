@@ -194,6 +194,12 @@ try:
 except ImportError:
     FieldEditorDialog = None
 
+# 导入几何编辑模块
+try:
+    from geometry_editor_dialog import GeometryEditorDialog
+except ImportError:
+    GeometryEditorDialog = None
+
 # 配置日志系统
 logging.basicConfig(
     level=logging.INFO,
@@ -1398,13 +1404,37 @@ class GeoDataInspector:
         except Exception as e:
             result['error'] = str(e)
             logger.error(f"检查SHP文件失败 {shp_path}: {e}")
+            
+            # 即使有错误，也尝试收集字段信息
+            try:
+                if hasattr(gdf, 'columns'):
+                    for col in gdf.columns:
+                        if col != 'geometry':
+                            field_info = {
+                                'name': col,
+                                'type': str(gdf[col].dtype),
+                                'null_count': gdf[col].isnull().sum(),
+                                'unique_count': gdf[col].nunique(),
+                                'sample_values': gdf[col].dropna().head(3).tolist() if gdf[col].dtype == 'object' else []
+                            }
+                            # 字段合规性检查
+                            if col in self.field_standards:
+                                issues = check_field_compliance(col, gdf[col], self.field_standards[col])
+                                field_info['compliance_issues'] = issues
+                            result['fields'].append(field_info)
+                    
+                    result['field_count'] = len(result['fields'])
+            except Exception as field_error:
+                logger.error(f"收集字段信息失败: {field_error}")
+            
             # 标记几何错误为可忽略
             if "LinearRing" in str(e) or "linestring" in str(e).lower():
-                self.results['errors'].append({
+                # 将几何错误添加到几何问题中，而不是文件读取错误
+                geometry_issue = f"几何错误 - 可忽略: {str(e)}"
+                result['topology_issues'].append(geometry_issue)
+                self.results['topology_issues'].append({
                     'file': str(shp_path),
-                    'error': f"几何错误 - 可忽略: {str(e)}",
-                    'level': ERROR_LEVELS['IGNORABLE'],
-                    'type': ERROR_TYPES['GEOMETRY_ERROR']
+                    'issue': geometry_issue
                 })
             else:
                 self.results['errors'].append({
@@ -2695,6 +2725,7 @@ DBF文件数量: {summary['dbf_files']}
         critical_errors = []  # 不可忽略错误
         ignorable_errors = []  # 可忽略错误
         field_edit_info = {}  # 按字段分组的编辑信息
+        geometry_edit_info = {}  # 按文件分组的几何编辑信息
         
         # 错误统计
         error_stats = {
@@ -2733,10 +2764,31 @@ DBF文件数量: {summary['dbf_files']}
                 error_stats[error_priority] += 1
                 error_stats['total'] += 1
             
+            # 处理几何问题
+            if file_result.get('topology_issues'):
+                geometry_key = f"{file_name}_geometry"
+                geometry_edit_info[geometry_key] = {
+                    'file_path': file_path,
+                    'layer_name': None,  # 对于SHP文件，图层名为None
+                    'issues': file_result['topology_issues'],
+                    'level': 'medium'
+                }
+            
             # GDB多图层
             if file_result.get('layers'):
                 for layer in file_result['layers']:
                     layer_name = layer.get('layer_name', '')
+                    
+                    # 处理图层的几何问题
+                    if layer.get('topology_issues'):
+                        geometry_key = f"{file_name}_{layer_name}_geometry"
+                        geometry_edit_info[geometry_key] = {
+                            'file_path': file_path,
+                            'layer_name': layer_name,
+                            'issues': layer['topology_issues'],
+                            'level': 'medium'
+                        }
+                    
                     for field in layer.get('fields', []):
                         compliance_issues = field.get('compliance_issues', [])
                         if isinstance(compliance_issues, list) and compliance_issues:
@@ -2864,7 +2916,7 @@ DBF文件数量: {summary['dbf_files']}
                     if error.get('layer_name'):
                         error_text += f" (图层: {error['layer_name']})"
                     error_text += f"\n  字段: {error.get('field_name', 'N/A')}\n"
-                    error_text += f"  问题: {error.get('message', 'N/A')}\n"
+                    error_text += f"  问题: {', '.join(error.get('issues', []))}\n"
                     if 'null_count' in error and 'unique_count' in error:
                         error_text += f"  空值: {error['null_count']}, 唯一值: {error['unique_count']}\n"
                     error_text += "\n"
@@ -2885,7 +2937,7 @@ DBF文件数量: {summary['dbf_files']}
                     if error.get('layer_name'):
                         error_text += f" (图层: {error['layer_name']})"
                     error_text += f"\n  字段: {error.get('field_name', 'N/A')}\n"
-                    error_text += f"  问题: {error.get('message', 'N/A')}\n"
+                    error_text += f"  问题: {', '.join(error.get('issues', []))}\n"
                     if 'null_count' in error and 'unique_count' in error:
                         error_text += f"  空值: {error['null_count']}, 唯一值: {error['unique_count']}\n"
                     error_text += "\n"
@@ -2901,6 +2953,22 @@ DBF文件数量: {summary['dbf_files']}
         topology_issues = self.results.get('topology_issues', []) if self.results else []
         attribute_issues = self.results.get('attribute_issues', []) if self.results else []
         basic_issues = self.results.get('basic_issues', []) if self.results else []
+        
+        # 处理属性问题，添加到字段编辑信息中
+        for issue in attribute_issues:
+            if isinstance(issue, dict):
+                file_path = issue.get('file', '')
+                if file_path:
+                    file_name = Path(file_path).name
+                    # 为属性问题创建字段编辑信息
+                    field_key = f"{file_name}_attribute"
+                    field_edit_info[field_key] = {
+                        'file_path': file_path,
+                        'field_name': 'DLBM',  # 根据问题类型确定字段名
+                        'layer_name': None,
+                        'issues': [str(issue.get('issue', ''))],
+                        'level': 'medium'
+                    }
         
         if errors:
             error_text += "🚨 文件读取错误:\n"
@@ -2922,8 +2990,17 @@ DBF文件数量: {summary['dbf_files']}
             error_text += "-" * 30 + "\n"
             for issue in attribute_issues:
                 if isinstance(issue, dict):
-                    error_text += f"📁 {str(issue.get('file', ''))}\n"
-                    error_text += f"  问题: {str(issue.get('issue', ''))}\n\n"
+                    file_name = str(issue.get('file', ''))
+                    if file_name:
+                        file_name = Path(file_name).name
+                    error_text += f"📁 {file_name}\n"
+                    issue_text = str(issue.get('issue', ''))
+                    # 如果是字典格式的问题，提取错误信息
+                    if isinstance(issue_text, dict):
+                        error_type = issue_text.get('type', '')
+                        error_msg = issue_text.get('error', '')
+                        issue_text = f"{error_type}: {error_msg}"
+                    error_text += f"  问题: {issue_text}\n\n"
         
         if basic_issues and isinstance(basic_issues, list):
             error_text += "⚠️ 基础问题:\n"
@@ -2940,87 +3017,332 @@ DBF文件数量: {summary['dbf_files']}
         self.error_text.insert(1.0, error_text)
         
         # 创建优化的编辑按钮
-        self.create_optimized_edit_buttons(field_edit_info)
+        # 添加调试信息
+        logger.info(f"字段编辑信息: {len(field_edit_info)} 个")
+        logger.info(f"几何编辑信息: {len(geometry_edit_info)} 个")
+        self.create_optimized_edit_buttons(field_edit_info, geometry_edit_info)
     
-    def create_optimized_edit_buttons(self, field_edit_info):
+    def create_optimized_edit_buttons(self, field_edit_info, geometry_edit_info=None):
         """创建优化的编辑按钮"""
-        # 清空现有按钮
+        # 清除现有的编辑按钮框架
         for widget in self.edit_buttons_frame.winfo_children():
             widget.destroy()
         
-        if not field_edit_info or FieldEditorDialog is None:
+        if not field_edit_info and not geometry_edit_info:
             return
         
-        # 按错误等级分组
-        critical_fields = []
-        ignorable_fields = []
+        # 分类字段编辑信息
+        critical_fields = {}
+        normal_fields = {}
         
-        for field_key, edit_info in field_edit_info.items():
-            if edit_info['level'] == ERROR_LEVELS['CRITICAL']:
-                critical_fields.append((field_key, edit_info))
-            else:
-                ignorable_fields.append((field_key, edit_info))
+        if field_edit_info:
+            for key, info in field_edit_info.items():
+                level = info.get('level', 'medium')
+                if level == ERROR_LEVELS['CRITICAL']:
+                    critical_fields[key] = info
+                else:
+                    normal_fields[key] = info
         
-        # 创建不可忽略错误编辑按钮
+        # 创建必要修复按钮框架
         if critical_fields:
-            critical_frame = ttk.LabelFrame(self.edit_buttons_frame, text="🚨 不可忽略错误字段编辑", padding="5")
-            critical_frame.pack(fill=tk.X, pady=(0, 10))
+            critical_frame = ttk.LabelFrame(self.edit_buttons_frame, text="🚨 必要修复", padding="5")
+            critical_frame.pack(fill=tk.X, padx=5, pady=2)
             
-            critical_buttons_frame = ttk.Frame(critical_frame)
-            critical_buttons_frame.pack(fill=tk.X)
-            
-            for field_key, edit_info in critical_fields:
-                button_text = f"编辑 {edit_info['field_name']}"
-                if edit_info['layer_name']:
-                    button_text += f" ({edit_info['layer_name']})"
-                
-                btn = ttk.Button(critical_buttons_frame, text=button_text, 
-                               command=lambda info=edit_info: self.open_field_editor(info),
-                               style='Critical.TButton')
-                btn.pack(side=tk.LEFT, padx=5, pady=2)
+            # 必要修复的字段编辑按钮
+            if FieldEditorDialog and critical_fields:
+                critical_field_button = ttk.Button(
+                    critical_frame, 
+                    text=f"字段编辑 ({len(critical_fields)}个)", 
+                    command=lambda: self.open_field_editor_dialog(critical_fields, "必要修复")
+                )
+                critical_field_button.pack(side=tk.LEFT, padx=5, pady=2)
         
-        # 创建可忽略错误编辑按钮
-        if ignorable_fields:
-            ignorable_frame = ttk.LabelFrame(self.edit_buttons_frame, text="⚠️ 可忽略错误字段编辑", padding="5")
-            ignorable_frame.pack(fill=tk.X)
+        # 创建建议修复按钮框架
+        if normal_fields or geometry_edit_info:
+            normal_frame = ttk.LabelFrame(self.edit_buttons_frame, text="⚠️ 建议修复", padding="5")
+            normal_frame.pack(fill=tk.X, padx=5, pady=2)
             
-            ignorable_buttons_frame = ttk.Frame(ignorable_frame)
-            ignorable_buttons_frame.pack(fill=tk.X)
+            # 建议修复的字段编辑按钮
+            if FieldEditorDialog and normal_fields:
+                normal_field_button = ttk.Button(
+                    normal_frame, 
+                    text=f"字段编辑 ({len(normal_fields)}个)", 
+                    command=lambda: self.open_field_editor_dialog(normal_fields, "建议修复")
+                )
+                normal_field_button.pack(side=tk.LEFT, padx=5, pady=2)
             
-            for field_key, edit_info in ignorable_fields:
-                button_text = f"编辑 {edit_info['field_name']}"
-                if edit_info['layer_name']:
-                    button_text += f" ({edit_info['layer_name']})"
-                
-                btn = ttk.Button(ignorable_buttons_frame, text=button_text, 
-                               command=lambda info=edit_info: self.open_field_editor(info),
-                               style='Ignorable.TButton')
-            btn.pack(side=tk.LEFT, padx=5, pady=2)
+            # 几何编辑按钮
+            if GeometryEditorDialog and geometry_edit_info:
+                geometry_button = ttk.Button(
+                    normal_frame, 
+                    text=f"几何编辑 ({len(geometry_edit_info)}个)", 
+                    command=lambda: self.open_geometry_editor_dialog(geometry_edit_info)
+                )
+                geometry_button.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # 添加说明标签
+        info_text = "🚨 必要修复: 必须修复的错误\n⚠️ 建议修复: 可忽略但建议修复的错误"
+        info_label = ttk.Label(
+            self.edit_buttons_frame, 
+            text=info_text,
+            font=("Arial", 9),
+            foreground="#666666"
+        )
+        info_label.pack(pady=5)
     
-    def open_field_editor(self, edit_info):
-        """打开字段编辑器"""
+    def open_field_editor_dialog(self, edit_info, category="字段编辑"):
+        """打开字段编辑器选择对话框"""
         try:
             if FieldEditorDialog is None:
                 messagebox.showerror("错误", "字段编辑功能未启用，请确保field_editor_dialog.py文件存在")
                 return
             
-            # 打开字段编辑弹窗
-            editor = FieldEditorDialog(
-                self.root,
-                edit_info['file_path'],
-                edit_info['field_name'],
-                edit_info['layer_name']
-            )
+            if not isinstance(edit_info, dict) or not edit_info:
+                messagebox.showerror("错误", "没有可编辑的字段")
+                return
             
-            # 等待编辑完成
-            if editor.run():
-                # 如果文件被修改，提示重新检查
-                if messagebox.askyesno("提示", "文件已修改，是否重新检查？"):
-                    self.start_check()
+            # 创建字段选择对话框
+            dialog = tk.Toplevel(self.root)
+            dialog.title(f"{category} - 选择字段")
+            dialog.geometry("800x600")  # 增加窗口大小
+            dialog.minsize(700, 500)    # 设置最小窗口大小
+            dialog.transient(self.root)
+            dialog.grab_set()
+            
+            # 设置对话框位置
+            dialog.update_idletasks()
+            x = (dialog.winfo_screenwidth() // 2) - (800 // 2)
+            y = (dialog.winfo_screenheight() // 2) - (600 // 2)
+            dialog.geometry(f"800x600+{x}+{y}")
+            
+            # 确保对话框显示在最前面
+            dialog.lift()
+            dialog.focus_force()
+            
+            logger.info(f"字段编辑器对话框已创建，位置: ({x}, {y})")
+            
+            # 创建主框架
+            main_frame = ttk.Frame(dialog, padding="10")
+            main_frame.pack(fill=tk.BOTH, expand=True)
+            
+            # 标题
+            title_label = ttk.Label(main_frame, text=f"{category} - 请选择要编辑的字段", 
+                                   font=("Arial", 12, "bold"))
+            title_label.pack(pady=(0, 10))
+            
+            # 创建字段列表
+            list_frame = ttk.Frame(main_frame)
+            list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+            
+            # 创建Treeview来显示字段信息
+            columns = ('文件', '图层', '字段', '问题', '等级')
+            tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=12)  # 减少表格高度，为按钮留出空间
+            
+            # 设置列标题
+            for col in columns:
+                tree.heading(col, text=col)
+            
+            # 设置列宽
+            tree.column('文件', width=150)
+            tree.column('图层', width=100)
+            tree.column('字段', width=100)
+            tree.column('问题', width=200)
+            tree.column('等级', width=80)
+            
+            # 添加滚动条
+            scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=tree.yview)
+            tree.configure(yscrollcommand=scrollbar.set)
+            
+            # 布局
+            tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            # 填充字段信息
+            field_items = []
+            for key, info in edit_info.items():
+                file_name = Path(info.get('file_path', '')).name
+                layer_name = info.get('layer_name', 'N/A')
+                field_name = info.get('field_name', 'N/A')
+                issues = info.get('issues', [])
+                level = info.get('level', 'medium')
+                
+                # 格式化问题信息
+                issue_text = '; '.join(str(i) for i in issues) if issues else '无'
+                
+                # 确定等级显示
+                level_display = "🚨 严重" if level == ERROR_LEVELS['CRITICAL'] else "⚠️ 一般"
+                
+                item = tree.insert('', 'end', values=(file_name, layer_name, field_name, issue_text, level_display))
+                field_items.append((key, info))
+            
+            # 按钮框架
+            button_frame = ttk.Frame(main_frame)
+            button_frame.pack(fill=tk.X, pady=(10, 0))
+            
+            def open_selected_field():
+                """打开选中的字段编辑器"""
+                selection = tree.selection()
+                if not selection:
+                    messagebox.showwarning("警告", "请选择一个字段")
+                    return
+                
+                # 获取选中的字段信息
+                selected_item = tree.item(selection[0])
+                selected_index = tree.index(selection[0])
+                key, info = field_items[selected_index]
+                
+                file_path = info.get('file_path')
+                field_name = info.get('field_name')
+                layer_name = info.get('layer_name')
+                
+                # 添加调试信息
+                logger.info(f"选中字段信息: file_path={file_path}, field_name={field_name}, layer_name={layer_name}")
+                logger.info(f"字段信息详情: {info}")
+                
+                if not file_path or not field_name:
+                    messagebox.showerror("错误", "无法获取文件路径或字段名")
+                    logger.error(f"字段信息不完整: file_path={file_path}, field_name={field_name}")
+                    return
+                
+                # 关闭选择对话框
+                dialog.destroy()
+                
+                # 打开字段编辑弹窗
+                if FieldEditorDialog is not None:
+                    try:
+                        logger.info(f"准备创建字段编辑器: file_path={file_path}, field_name={field_name}, layer_name={layer_name}")
+                        
+                        # 验证参数
+                        if not file_path or not os.path.exists(file_path):
+                            raise FileNotFoundError(f"文件不存在: {file_path}")
+                        if not field_name:
+                            raise ValueError("字段名不能为空")
+                        
+                        editor = FieldEditorDialog(
+                            self.root,
+                            file_path,
+                            field_name,
+                            layer_name
+                        )
+                        
+                        logger.info("字段编辑器创建成功")
+                        
+                        # 等待编辑完成
+                        if editor is not None and editor.run(): 
+                            # 如果文件被修改，提示重新检查
+                            if messagebox.askyesno("提示", "文件已修改，是否重新检查？"):
+                                self.start_check()
+                    except FileNotFoundError as e:
+                        messagebox.showerror("错误", f"文件不存在: {str(e)}")
+                        logger.error(f"文件不存在: {e}")
+                    except ValueError as e:
+                        messagebox.showerror("错误", f"参数错误: {str(e)}")
+                        logger.error(f"参数错误: {e}")
+                    except Exception as e:
+                        messagebox.showerror("错误", f"打开字段编辑器失败: {str(e)}")
+                        logger.error(f"打开字段编辑器失败: {e}", exc_info=True)
+                else:
+                    messagebox.showerror("错误", "字段编辑功能未启用")
+            
+            def open_all_fields():
+                """批量打开所有字段编辑器"""
+                if messagebox.askyesno("确认", f"确定要依次打开所有 {len(field_items)} 个字段编辑器吗？"):
+                    dialog.destroy()
+                    
+                    for i, (key, info) in enumerate(field_items):
+                        file_path = info.get('file_path')
+                        field_name = info.get('field_name')
+                        layer_name = info.get('layer_name')
+                        
+                        if not file_path or not field_name:
+                            continue
+                        
+                        # 显示进度
+                        self.status_var.set(f"正在编辑字段 {i+1}/{len(field_items)}: {field_name}")
+                        self.root.update()
+                        
+                        # 打开字段编辑弹窗
+                        editor = None
+                        if FieldEditorDialog is not None:
+                            try:
+                                logger.info(f"批量编辑 - 准备创建字段编辑器: file_path={file_path}, field_name={field_name}, layer_name={layer_name}")
+                                
+                                # 验证参数
+                                if not file_path or not os.path.exists(file_path):
+                                    raise FileNotFoundError(f"文件不存在: {file_path}")
+                                if not field_name:
+                                    raise ValueError("字段名不能为空")
+                                
+                                editor = FieldEditorDialog(
+                                    self.root,
+                                    file_path,
+                                    field_name,
+                                    layer_name
+                                )
+                                
+                                logger.info("批量编辑 - 字段编辑器创建成功")
+                                
+                                # 等待编辑完成
+                                if editor is not None and editor.run():  # type: ignore
+                                    # 如果文件被修改，询问是否继续
+                                    if not messagebox.askyesno("提示", f"字段 {field_name} 已修改，是否继续编辑下一个字段？"):
+                                        break
+                            except FileNotFoundError as e:
+                                messagebox.showerror("错误", f"文件不存在: {str(e)}")
+                                logger.error(f"批量编辑 - 文件不存在: {e}")
+                                continue
+                            except ValueError as e:
+                                messagebox.showerror("错误", f"参数错误: {str(e)}")
+                                logger.error(f"批量编辑 - 参数错误: {e}")
+                                continue
+                            except Exception as e:
+                                messagebox.showerror("错误", f"打开字段编辑器失败: {str(e)}")
+                                logger.error(f"批量编辑 - 打开字段编辑器失败: {e}", exc_info=True)
+                                continue
+                        else:
+                            messagebox.showerror("错误", "字段编辑功能未启用")
+                            break
+                    
+                    # 编辑完成后提示重新检查
+                    if messagebox.askyesno("提示", "字段编辑已完成，是否重新检查？"):
+                        self.start_check()
+            
+            # 按钮
+            logger.info(f"创建字段编辑按钮，字段数量: {len(field_items)}")
+            
+            # 左侧按钮
+            left_button_frame = ttk.Frame(button_frame)
+            left_button_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            
+            # 右侧按钮
+            right_button_frame = ttk.Frame(button_frame)
+            right_button_frame.pack(side=tk.RIGHT, fill=tk.X)
+            
+            # 创建按钮
+            edit_button = ttk.Button(left_button_frame, text="编辑选中字段", command=open_selected_field)
+            edit_button.pack(side=tk.LEFT, padx=(0, 10))
+            
+            batch_button = ttk.Button(left_button_frame, text="批量编辑所有字段", command=open_all_fields)
+            batch_button.pack(side=tk.LEFT, padx=(0, 10))
+            
+            cancel_button = ttk.Button(right_button_frame, text="取消", command=dialog.destroy)
+            cancel_button.pack(side=tk.RIGHT)
+            
+            # 添加按钮状态调试
+            logger.info(f"按钮创建完成: 编辑按钮={edit_button}, 批量按钮={batch_button}, 取消按钮={cancel_button}")
+            
+            # 添加调试信息
+            logger.info(f"字段编辑器对话框创建完成，包含 {len(field_items)} 个字段")
+            for i, (key, info) in enumerate(field_items):
+                logger.info(f"字段 {i+1}: {info.get('field_name', 'N/A')} - {info.get('file_path', 'N/A')}")
             
         except Exception as e:
             messagebox.showerror("错误", f"打开字段编辑器失败: {str(e)}")
             logger.error(f"打开字段编辑器失败: {e}")
+    
+    def open_field_editor(self, edit_info):
+        """打开字段编辑器（兼容旧版本）"""
+        self.open_field_editor_dialog(edit_info, "字段编辑")
     
     def export_report(self):
         """导出报告"""
@@ -3087,6 +3409,166 @@ DBF文件数量: {summary['dbf_files']}
     def run(self):
         """运行GUI"""
         self.root.mainloop()
+
+    def open_geometry_editor_dialog(self, edit_info):
+        """打开几何编辑器选择对话框"""
+        if GeometryEditorDialog is None:
+            messagebox.showerror("错误", "几何编辑模块未加载")
+            return
+        
+        try:
+            if not isinstance(edit_info, dict) or not edit_info:
+                messagebox.showerror("错误", "没有可编辑的几何文件")
+                return
+            
+            # 创建几何文件选择对话框
+            dialog = tk.Toplevel(self.root)
+            dialog.title("几何编辑 - 选择文件")
+            dialog.geometry("800x600")
+            dialog.transient(self.root)
+            dialog.grab_set()
+            
+            # 设置对话框位置
+            dialog.update_idletasks()
+            x = (dialog.winfo_screenwidth() // 2) - (600 // 2)
+            y = (dialog.winfo_screenheight() // 2) - (400 // 2)
+            dialog.geometry(f"800x600+{x}+{y}")
+            
+            # 创建主框架
+            main_frame = ttk.Frame(dialog, padding="10")
+            main_frame.pack(fill=tk.BOTH, expand=True)
+            
+            # 标题
+            title_label = ttk.Label(main_frame, text="几何编辑 - 请选择要编辑的文件", 
+                                   font=("Arial", 12, "bold"))
+            title_label.pack(pady=(0, 10))
+            
+            # 创建文件列表
+            list_frame = ttk.Frame(main_frame)
+            list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+            
+            # 创建Treeview来显示文件信息
+            columns = ('文件', '图层', '问题', '等级')
+            tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=15)
+            
+            # 设置列标题
+            for col in columns:
+                tree.heading(col, text=col)
+            
+            # 设置列宽
+            tree.column('文件', width=200)
+            tree.column('图层', width=150)
+            tree.column('问题', width=200)
+            tree.column('等级', width=80)
+            
+            # 添加滚动条
+            scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=tree.yview)
+            tree.configure(yscrollcommand=scrollbar.set)
+            
+            # 布局
+            tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            # 填充文件信息
+            file_items = []
+            for key, info in edit_info.items():
+                file_name = Path(info.get('file_path', '')).name
+                layer_name = info.get('layer_name', 'N/A')
+                issues = info.get('issues', [])
+                level = info.get('level', 'medium')
+                
+                # 格式化问题信息
+                issue_text = '; '.join(str(i) for i in issues) if issues else '无'
+                
+                # 确定等级显示
+                level_display = "🚨 严重" if level == ERROR_LEVELS['CRITICAL'] else "⚠️ 一般"
+                
+                item = tree.insert('', 'end', values=(file_name, layer_name, issue_text, level_display))
+                file_items.append((key, info))
+            
+            # 按钮框架
+            button_frame = ttk.Frame(main_frame)
+            button_frame.pack(fill=tk.X, pady=(10, 0))
+            
+            def open_selected_file():
+                """打开选中的几何编辑器"""
+                selection = tree.selection()
+                if not selection:
+                    messagebox.showwarning("警告", "请选择一个文件")
+                    return
+                
+                # 获取选中的文件信息
+                selected_item = tree.item(selection[0])
+                selected_index = tree.index(selection[0])
+                key, info = file_items[selected_index]
+                
+                file_path = info.get('file_path')
+                layer_name = info.get('layer_name')
+                
+                if not file_path:
+                    messagebox.showerror("错误", "无法获取文件路径")
+                    return
+                
+                # 关闭选择对话框
+                dialog.destroy()
+                
+                # 打开几何编辑对话框
+                if GeometryEditorDialog is not None:
+                    geometry_dialog = GeometryEditorDialog(self.root, file_path, layer_name)
+                else:
+                    geometry_dialog = None
+                has_changes = geometry_dialog is not None and geometry_dialog.run()  # type: ignore
+                
+                if has_changes:
+                    messagebox.showinfo("完成", "几何编辑已完成")
+                    # 可以在这里添加刷新结果的逻辑
+                    if messagebox.askyesno("提示", "几何已修改，是否重新检查？"):
+                        self.start_check()
+            
+            def open_all_files():
+                """批量打开所有几何编辑器"""
+                if messagebox.askyesno("确认", f"确定要依次打开所有 {len(file_items)} 个几何编辑器吗？"):
+                    dialog.destroy()
+                    
+                    for i, (key, info) in enumerate(file_items):
+                        file_path = info.get('file_path')
+                        layer_name = info.get('layer_name')
+                        
+                        if not file_path:
+                            continue
+                        
+                        # 显示进度
+                        self.status_var.set(f"正在编辑几何 {i+1}/{len(file_items)}: {Path(file_path).name}")
+                        self.root.update()
+                        
+                        # 打开几何编辑对话框
+                        if GeometryEditorDialog is not None:
+                            geometry_dialog = GeometryEditorDialog(self.root, file_path, layer_name)
+                        else:
+                            geometry_dialog = None
+                        has_changes = geometry_dialog is not None and geometry_dialog.run()  # type: ignore
+                        
+                        if has_changes:
+                            # 如果文件被修改，询问是否继续
+                            if not messagebox.askyesno("提示", f"几何 {Path(file_path).name} 已修改，是否继续编辑下一个文件？"):
+                                break
+                    
+                    # 编辑完成后提示重新检查
+                    if messagebox.askyesno("提示", "几何编辑已完成，是否重新检查？"):
+                        self.start_check()
+            
+            # 按钮
+            ttk.Button(button_frame, text="编辑选中文件", command=open_selected_file).pack(side=tk.LEFT, padx=(0, 10))
+            ttk.Button(button_frame, text="批量编辑所有文件", command=open_all_files).pack(side=tk.LEFT, padx=(0, 10))
+            ttk.Button(button_frame, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
+            
+        except Exception as e:
+            logger.error(f"打开几何编辑器失败: {e}")
+            messagebox.showerror("错误", f"打开几何编辑器失败: {str(e)}")
+    
+    def open_geometry_editor(self, edit_info):
+        """打开几何编辑对话框（兼容旧版本）"""
+        self.open_geometry_editor_dialog(edit_info)
 
 def main():
     """主函数"""

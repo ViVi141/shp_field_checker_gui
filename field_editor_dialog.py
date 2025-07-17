@@ -56,6 +56,16 @@ class FieldEditorDialog:
         """
         初始化字段编辑弹窗
         """
+        # 添加参数验证和调试信息
+        logger.info(f"初始化字段编辑器: parent={parent}, file_path={file_path}, field_name={field_name}, layer_name={layer_name}")
+        
+        if not parent:
+            raise ValueError("父窗口不能为空")
+        if not file_path:
+            raise ValueError("文件路径不能为空")
+        if not field_name:
+            raise ValueError("字段名不能为空")
+        
         self.parent = parent
         self.file_path = Path(file_path)
         self.field_name = field_name
@@ -72,6 +82,12 @@ class FieldEditorDialog:
         self.operation_count = 0
         self.repair_text = None
         
+        # 验证文件是否存在
+        if not self.file_path.exists():
+            raise FileNotFoundError(f"文件不存在: {self.file_path}")
+        
+        logger.info(f"文件路径验证通过: {self.file_path}")
+        
         # 创建弹窗
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(f"编辑字段: {field_name}")
@@ -86,8 +102,14 @@ class FieldEditorDialog:
         y = (self.dialog.winfo_screenheight() // 2) - (800 // 2)
         self.dialog.geometry(f"1200x800+{x}+{y}")
         
-        self.setup_ui()
-        self.load_data()
+        try:
+            self.setup_ui()
+            self.load_data()
+            logger.info("字段编辑器初始化完成")
+        except Exception as e:
+            logger.error(f"字段编辑器初始化失败: {e}")
+            self.dialog.destroy()
+            raise
 
     def setup_ui(self):
         """设置界面"""
@@ -96,7 +118,7 @@ class FieldEditorDialog:
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
         # 左侧面板 - 工具和统计
-        left_panel = ttk.Frame(main_frame, width=300)  # 增加左侧面板宽度
+        left_panel = ttk.Frame(main_frame, width=320)  # 增加左侧面板宽度
         left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
         left_panel.pack_propagate(False)  # 防止面板被压缩
         
@@ -138,7 +160,7 @@ class FieldEditorDialog:
         suggestion_frame = ttk.LabelFrame(left_panel, text="修复建议")
         suggestion_frame.pack(fill=tk.X, pady=(0, 10))
         
-        self.suggestion_text = tk.Text(suggestion_frame, height=5, width=35, wrap=tk.WORD)
+        self.suggestion_text = tk.Text(suggestion_frame, height=6, width=40, wrap=tk.WORD)
         self.suggestion_text.pack(fill=tk.BOTH, padx=5, pady=(5,0))
         self.suggestion_text.config(state=tk.DISABLED)
         
@@ -151,7 +173,7 @@ class FieldEditorDialog:
         stats_frame = ttk.LabelFrame(left_panel, text="统计信息")
         stats_frame.pack(fill=tk.X, pady=(0, 10))
         
-        self.stats_text = tk.Text(stats_frame, height=8, width=35)
+        self.stats_text = tk.Text(stats_frame, height=10, width=40)
         self.stats_text.pack(fill=tk.BOTH, padx=5, pady=5)
         
         # 右侧主面板
@@ -192,6 +214,38 @@ class FieldEditorDialog:
         self.status_var = tk.StringVar(value="就绪")
         status_bar = ttk.Label(self.dialog, textvariable=self.status_var, relief=tk.SUNKEN)
         status_bar.pack(fill=tk.X, side=tk.BOTTOM, padx=10, pady=2)
+        
+        # 绑定窗口大小变化事件
+        self.dialog.bind('<Configure>', self.on_window_resize)
+
+    def on_window_resize(self, event):
+        """窗口大小变化时的处理"""
+        if event.widget == self.dialog:
+            # 重新计算表格列宽
+            self.update_table_column_widths()
+    
+    def update_table_column_widths(self):
+        """更新表格列宽以适应窗口大小"""
+        try:
+            if hasattr(self, 'tree'):
+                # 获取窗口宽度
+                window_width = self.dialog.winfo_width()
+                left_panel_width = 320  # 左侧面板宽度
+                available_width = window_width - left_panel_width - 40  # 减去边距
+                
+                if available_width > 400:  # 确保有足够的最小宽度
+                    # 动态调整列宽
+                    index_width = max(80, available_width * 0.1)
+                    value_width = max(400, available_width * 0.6)
+                    null_width = max(100, available_width * 0.15)
+                    validation_width = max(100, available_width * 0.15)
+                    
+                    self.tree.column('index', width=int(index_width))
+                    self.tree.column('value', width=int(value_width))
+                    self.tree.column('is_null', width=int(null_width))
+                    self.tree.column('validation', width=int(validation_width))
+        except Exception as e:
+            logger.warning(f"更新表格列宽时出错: {e}")
 
     def create_table(self, parent):
         """创建表格"""
@@ -209,7 +263,7 @@ class FieldEditorDialog:
         self.tree.heading('is_null', text='是否为空')
         self.tree.heading('validation', text='验证状态')
         
-        # 设置列宽
+        # 设置初始列宽
         self.tree.column('index', width=80, minwidth=60)
         self.tree.column('value', width=600, minwidth=400)  # 增加字段值列的宽度
         self.tree.column('is_null', width=100, minwidth=80)
@@ -225,13 +279,10 @@ class FieldEditorDialog:
         hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         
-        # 布局
-        self.tree.grid(row=0, column=0, sticky='nsew')
-        vsb.grid(row=0, column=1, sticky='ns')
-        hsb.grid(row=1, column=0, sticky='ew')
-        
-        table_frame.grid_rowconfigure(0, weight=1)
-        table_frame.grid_columnconfigure(0, weight=1)
+        # 布局 - 使用pack布局以支持自适应
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         # 绑定事件
         self.tree.bind('<Double-1>', self.on_double_click)
@@ -598,8 +649,11 @@ class FieldEditorDialog:
     def validate_data(self):
         """数据验证"""
         # 获取字段类型
-        field_type = self.original_data[self.field_name].dtype
-        
+        if self.original_data is None or self.field_name is None:
+            field_type = None
+        else:
+            field_type = self.original_data[self.field_name].dtype if self.field_name in self.original_data else None
+
         # 验证规则
         rules = {
             'object': lambda x: isinstance(x, str) and bool(x.strip()),  # 非空字符串
@@ -732,10 +786,13 @@ class FieldEditorDialog:
     
     def search(self):
         """搜索功能"""
-        search_text = self.search_var.get()
+        if self.search_var is None:
+            messagebox.showerror("错误", "搜索变量未初始化")
+            return
+        search_text = self.search_var.get() if hasattr(self.search_var, "get") else None
         if not search_text:
             return
-        
+
         # 清除之前的搜索结果
         self.search_results = []
         self.current_search_index = -1
@@ -777,12 +834,15 @@ class FieldEditorDialog:
             return
         
         item = self.search_results[self.current_search_index]
-        old_value = str(self.tree.item(item)['values'][1])
-        new_value = old_value.replace(self.search_var.get(), self.replace_var.get())
+        item_data = self.tree.item(item)
+        values = item_data.get('values') if item_data else None
+        old_value = str(values[1]) if values and len(values) > 1 else ""
+        search_text = self.search_var.get() if self.search_var and hasattr(self.search_var, "get") else ""
+        replace_text = self.replace_var.get() if self.replace_var and hasattr(self.replace_var, "get") else ""
+        new_value = old_value.replace(search_text, replace_text)
         
         self.tree.set(item, 'value', new_value)
         self.tree.set(item, 'is_null', '否' if new_value else '是')
-        
         # 移动到下一个
         if self.current_search_index < len(self.search_results) - 1:
             self.current_search_index += 1
@@ -796,8 +856,12 @@ class FieldEditorDialog:
         
         count = 0
         for item in self.search_results:
-            old_value = str(self.tree.item(item)['values'][1])
-            new_value = old_value.replace(self.search_var.get(), self.replace_var.get())
+            item_data = self.tree.item(item)
+            values = item_data.get('values') if item_data else None
+            old_value = str(values[1]) if values and len(values) > 1 else ""
+            search_text = self.search_var.get() if self.search_var and hasattr(self.search_var, "get") else ""
+            replace_text = self.replace_var.get() if self.replace_var and hasattr(self.replace_var, "get") else ""
+            new_value = old_value.replace(search_text, replace_text)
             
             self.tree.set(item, 'value', new_value)
             self.tree.set(item, 'is_null', '否' if new_value else '是')
@@ -1133,6 +1197,8 @@ class FieldEditorDialog:
     def record_operation(self, operation):
         """记录操作"""
         self.last_operation = operation
+        if not hasattr(self, 'operation_count') or not isinstance(self.operation_count, dict):
+            self.operation_count = {}
         self.operation_count[operation] = self.operation_count.get(operation, 0) + 1
         self.update_suggestions() 
 
@@ -1389,7 +1455,7 @@ class FieldEditorDialog:
             messagebox.showerror("错误", f"填充值时出错: {str(e)}")
 
     def quick_fix(self):
-        """一键修复功能"""
+        """一键修复"""
         try:
             if not self.data_patterns:
                 messagebox.showwarning("提示", "没有可用的修复方案")
@@ -1428,6 +1494,17 @@ class FieldEditorDialog:
             
             # 更新建议
             self.analyze_data_patterns()
+            
+            # --- 同步表格内容到self.modified_data ---
+            if self.modified_data is not None:
+                for item in self.tree.get_children():
+                    values = self.tree.item(item, 'values')
+                    index = int(values[0]) - 1
+                    value = values[1]
+                    if value == "(空值)":
+                        self.modified_data.loc[index, self.field_name] = None
+                    else:
+                        self.modified_data.loc[index, self.field_name] = value
             
         except Exception as e:
             logger.error(f"快速修复时出错: {e}", exc_info=True)
