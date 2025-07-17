@@ -36,6 +36,157 @@ import pyproj
 from pyproj import CRS
 import logging
 import hashlib
+import time
+import psutil
+
+# 用户友好的错误处理类
+class UserFriendlyErrorHandler:
+    """用户友好的错误处理类"""
+    
+    # 错误类型映射
+    ERROR_TYPE_MAP = {
+        'file_not_found': '文件未找到',
+        'permission_denied': '权限不足',
+        'encoding_error': '编码错误',
+        'format_error': '格式错误',
+        'memory_error': '内存不足',
+        'timeout_error': '处理超时',
+        'validation_error': '数据验证错误',
+        'topology_error': '拓扑错误',
+        'attribute_error': '属性错误',
+        'geometry_error': '几何错误',
+        'unknown_error': '未知错误'
+    }
+    
+    # 错误解决建议
+    ERROR_SOLUTIONS = {
+        'file_not_found': [
+            '检查文件路径是否正确',
+            '确认文件是否存在于指定位置',
+            '检查文件名是否包含特殊字符'
+        ],
+        'permission_denied': [
+            '以管理员身份运行程序',
+            '检查文件是否被其他程序占用',
+            '确认对目标目录有读写权限'
+        ],
+        'encoding_error': [
+            '尝试使用不同的编码格式',
+            '检查文件是否损坏',
+            '使用文本编辑器重新保存文件'
+        ],
+        'format_error': [
+            '确认文件格式是否正确',
+            '检查文件是否完整',
+            '使用专业软件验证文件格式'
+        ],
+        'memory_error': [
+            '关闭其他占用内存的程序',
+            '分批处理大文件',
+            '增加系统虚拟内存'
+        ],
+        'timeout_error': [
+            '检查网络连接',
+            '增加处理超时时间',
+            '分批处理文件'
+        ],
+        'validation_error': [
+            '检查数据是否符合标准规范',
+            '修正字段类型和格式',
+            '补充缺失的必填字段'
+        ],
+        'topology_error': [
+            '修复几何要素的拓扑问题',
+            '检查面要素的闭合性',
+            '修正重叠和缝隙问题'
+        ],
+        'attribute_error': [
+            '检查字段名称和类型',
+            '修正字段值格式',
+            '补充缺失的属性信息'
+        ],
+        'geometry_error': [
+            '使用几何修复工具自动修复线性环未闭合问题',
+            '检查几何要素的首尾点坐标是否一致',
+            '使用专业GIS软件（如QGIS、ArcGIS）修复几何',
+            '检查坐标精度，确保首尾点完全重合',
+            '重新数字化有问题的几何要素'
+        ],
+        'unknown_error': [
+            '重启程序后重试',
+            '检查系统环境',
+            '联系技术支持'
+        ]
+    }
+    
+    @classmethod
+    def classify_error(cls, error_message):
+        """分类错误类型"""
+        error_lower = error_message.lower()
+        
+        if 'file not found' in error_lower or 'no such file' in error_lower:
+            return 'file_not_found'
+        elif 'permission denied' in error_lower or 'access denied' in error_lower:
+            return 'permission_denied'
+        elif 'encoding' in error_lower or 'decode' in error_lower:
+            return 'encoding_error'
+        elif 'format' in error_lower or 'invalid' in error_lower:
+            return 'format_error'
+        elif 'memory' in error_lower or 'out of memory' in error_lower:
+            return 'memory_error'
+        elif 'timeout' in error_lower or 'timed out' in error_lower:
+            return 'timeout_error'
+        elif 'validation' in error_lower or 'compliance' in error_lower:
+            return 'validation_error'
+        elif 'topology' in error_lower:
+            return 'topology_error'
+        elif 'attribute' in error_lower or 'field' in error_lower:
+            return 'attribute_error'
+        elif 'geometry' in error_lower or 'shape' in error_lower:
+            return 'geometry_error'
+        elif 'linearring' in error_lower or 'linestring' in error_lower or 'closed' in error_lower:
+            return 'geometry_error'
+        else:
+            return 'unknown_error'
+    
+    @classmethod
+    def get_user_friendly_message(cls, error_message, file_name=""):
+        """获取用户友好的错误信息"""
+        error_type = cls.classify_error(error_message)
+        error_name = cls.ERROR_TYPE_MAP.get(error_type, '未知错误')
+        
+        # 构建用户友好的消息
+        friendly_message = f"错误类型: {error_name}\n"
+        if file_name:
+            friendly_message += f"问题文件: {file_name}\n"
+        friendly_message += f"错误详情: {error_message}\n\n"
+        
+        # 添加解决建议
+        solutions = cls.ERROR_SOLUTIONS.get(error_type, [])
+        if solutions:
+            friendly_message += "解决建议:\n"
+            for i, solution in enumerate(solutions, 1):
+                friendly_message += f"{i}. {solution}\n"
+        
+        return friendly_message
+    
+    @classmethod
+    def get_error_priority(cls, error_type):
+        """获取错误优先级"""
+        priority_map = {
+            'permission_denied': 'critical',
+            'memory_error': 'critical',
+            'file_not_found': 'high',
+            'format_error': 'high',
+            'encoding_error': 'medium',
+            'validation_error': 'medium',
+            'topology_error': 'medium',
+            'attribute_error': 'medium',
+            'geometry_error': 'medium',
+            'timeout_error': 'low',
+            'unknown_error': 'low'
+        }
+        return priority_map.get(error_type, 'low')
 
 # 导入字段编辑模块
 try:
@@ -669,20 +820,43 @@ def check_geometry_validity(geometries):
             invalid_geometries.append({
                 'feature': i,
                 'error': '几何为空',
-                'type': '几何检查'
+                'type': '几何检查',
+                'severity': 'critical'
             })
         elif geom.is_empty:
             invalid_geometries.append({
                 'feature': i,
                 'error': '几何为空几何',
-                'type': '几何检查'
+                'type': '几何检查',
+                'severity': 'critical'
             })
         elif not geom.is_valid:
-            invalid_geometries.append({
-                'feature': i,
-                'error': f'几何无效: {geom.is_valid_reason if hasattr(geom, "is_valid_reason") else "未知原因"}',
-                'type': '几何检查'
-            })
+            # 尝试修复几何
+            try:
+                fixed_geom = make_valid(geom)
+                if fixed_geom.is_valid:
+                    invalid_geometries.append({
+                        'feature': i,
+                        'error': f'几何无效但可修复: {geom.is_valid_reason if hasattr(geom, "is_valid_reason") else "线性环未闭合"}',
+                        'type': '几何检查',
+                        'severity': 'fixable',
+                        'original_error': geom.is_valid_reason if hasattr(geom, "is_valid_reason") else "线性环未闭合",
+                        'fix_suggestion': '使用几何修复工具自动修复'
+                    })
+                else:
+                    invalid_geometries.append({
+                        'feature': i,
+                        'error': f'几何无效且无法修复: {geom.is_valid_reason if hasattr(geom, "is_valid_reason") else "未知原因"}',
+                        'type': '几何检查',
+                        'severity': 'critical'
+                    })
+            except Exception as e:
+                invalid_geometries.append({
+                    'feature': i,
+                    'error': f'几何无效且修复失败: {geom.is_valid_reason if hasattr(geom, "is_valid_reason") else "未知原因"} - {str(e)}',
+                    'type': '几何检查',
+                    'severity': 'critical'
+                })
     return invalid_geometries
 
 def check_coordinate_system(gdf):
@@ -1977,6 +2151,14 @@ class GeoDataInspectorGUI:
         self.last_input_dir = ""
         self.last_output_dir = ""
         
+        # 新增：进度相关变量
+        self.start_time = None
+        self.end_time = None
+        self.current_file = ""
+        self.current_phase = ""
+        self.estimated_remaining = ""
+        self.memory_usage = ""
+        
         self.setup_ui()
         self.load_last_directories()
     
@@ -2068,17 +2250,65 @@ class GeoDataInspectorGUI:
         progress_inner_frame = ttk.Frame(progress_frame)
         progress_inner_frame.pack(fill=tk.X)
         
-        ttk.Label(progress_inner_frame, text="进度:", font=("Arial", 9, "bold")).pack(side=tk.LEFT)
+        # 进度条
+        progress_bar_frame = ttk.Frame(progress_inner_frame)
+        progress_bar_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        ttk.Label(progress_bar_frame, text="进度:", font=("Arial", 9, "bold")).pack(side=tk.LEFT)
         self.progress_var = tk.DoubleVar()
-        progress_bar = ttk.Progressbar(progress_inner_frame, variable=self.progress_var, 
+        progress_bar = ttk.Progressbar(progress_bar_frame, variable=self.progress_var, 
                                      maximum=100, length=400, mode='determinate')
         progress_bar.pack(side=tk.LEFT, padx=(10, 10), fill=tk.X, expand=True)
         
         # 状态标签
         self.status_var = tk.StringVar(value="就绪")
-        status_label = ttk.Label(progress_inner_frame, textvariable=self.status_var, 
+        status_label = ttk.Label(progress_bar_frame, textvariable=self.status_var, 
                                 font=("Arial", 9), foreground="#2E86AB")
         status_label.pack(side=tk.RIGHT)
+        
+        # 详细信息区域
+        details_frame = ttk.Frame(progress_inner_frame)
+        details_frame.pack(fill=tk.X)
+        
+        # 左侧信息
+        left_info = ttk.Frame(details_frame)
+        left_info.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # 当前文件
+        current_file_frame = ttk.Frame(left_info)
+        current_file_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(current_file_frame, text="当前文件:", font=("Arial", 8)).pack(side=tk.LEFT)
+        self.current_file_var = tk.StringVar(value="无")
+        ttk.Label(current_file_frame, textvariable=self.current_file_var, 
+                 font=("Arial", 8), foreground="#666666").pack(side=tk.LEFT, padx=(5, 0))
+        
+        # 处理阶段
+        phase_frame = ttk.Frame(left_info)
+        phase_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(phase_frame, text="处理阶段:", font=("Arial", 8)).pack(side=tk.LEFT)
+        self.current_phase_var = tk.StringVar(value="无")
+        ttk.Label(phase_frame, textvariable=self.current_phase_var, 
+                 font=("Arial", 8), foreground="#666666").pack(side=tk.LEFT, padx=(5, 0))
+        
+        # 右侧信息
+        right_info = ttk.Frame(details_frame)
+        right_info.pack(side=tk.RIGHT)
+        
+        # 预估剩余时间
+        time_frame = ttk.Frame(right_info)
+        time_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(time_frame, text="剩余时间:", font=("Arial", 8)).pack(side=tk.LEFT)
+        self.estimated_time_var = tk.StringVar(value="--")
+        ttk.Label(time_frame, textvariable=self.estimated_time_var, 
+                 font=("Arial", 8), foreground="#666666").pack(side=tk.LEFT, padx=(5, 0))
+        
+        # 内存使用
+        memory_frame = ttk.Frame(right_info)
+        memory_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(memory_frame, text="内存使用:", font=("Arial", 8)).pack(side=tk.LEFT)
+        self.memory_usage_var = tk.StringVar(value="--")
+        ttk.Label(memory_frame, textvariable=self.memory_usage_var, 
+                 font=("Arial", 8), foreground="#666666").pack(side=tk.LEFT, padx=(5, 0))
         
         # 结果显示区域
         result_frame = ttk.LabelFrame(main_frame, text="📋 检查结果", padding="10")
@@ -2183,8 +2413,8 @@ class GeoDataInspectorGUI:
             self.last_output_dir = directory
             self.save_last_directories()
     
-    def update_progress(self, current, total, message):
-        """更新进度条"""
+    def update_progress(self, current, total, message, current_file="", phase="", estimated_time=""):
+        """更新进度条 - 增强版"""
         if total > 0:
             progress = (current / total) * 100
             self.progress_var.set(progress)
@@ -2196,6 +2426,40 @@ class GeoDataInspectorGUI:
         # 更新文件计数
         if total > 0:
             self.file_count_var.set(f"文件: {current}/{total}")
+        
+        # 更新详细信息
+        if current_file:
+            self.current_file_var.set(current_file)
+        if phase:
+            self.current_phase_var.set(phase)
+        if estimated_time:
+            self.estimated_time_var.set(estimated_time)
+        
+        # 更新内存使用情况
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            self.memory_usage_var.set(f"{memory_mb:.1f} MB")
+        except ImportError:
+            self.memory_usage_var.set("--")
+        
+        # 计算预估剩余时间
+        if self.start_time and current > 0 and total > 0:
+            elapsed_time = time.time() - self.start_time
+            if current > 0:
+                avg_time_per_file = elapsed_time / current
+                remaining_files = total - current
+                estimated_remaining = avg_time_per_file * remaining_files
+                
+                if estimated_remaining > 60:
+                    time_str = f"{estimated_remaining/60:.1f} 分钟"
+                elif estimated_remaining > 1:
+                    time_str = f"{estimated_remaining:.0f} 秒"
+                else:
+                    time_str = "小于1秒"
+                
+                self.estimated_time_var.set(time_str)
         
         self.root.update_idletasks()
     
@@ -2228,6 +2492,16 @@ class GeoDataInspectorGUI:
         self.status_bar_var.set("正在初始化检查...")
         self.file_count_var.set("文件: 0/0")
         
+        # 重置详细信息
+        self.current_file_var.set("无")
+        self.current_phase_var.set("无")
+        self.estimated_time_var.set("--")
+        self.memory_usage_var.set("--")
+        
+        # 记录开始时间
+        self.start_time = time.time()
+        self.end_time = None
+        
         # 清空结果显示
         self.summary_text.delete(1.0, tk.END)
         self.detail_text.delete(1.0, tk.END)
@@ -2245,10 +2519,15 @@ class GeoDataInspectorGUI:
                 logger.info("检查完成")
                 
             except Exception as e:
-                error_msg = f"检查过程中出现错误: {str(e)}"
-                logger.error(error_msg)
-                self.root.after(0, lambda: messagebox.showerror("错误", error_msg))
+                error_msg = str(e)
+                logger.error(f"检查过程中出现错误: {error_msg}")
+                
+                # 使用用户友好的错误处理
+                friendly_error = UserFriendlyErrorHandler.get_user_friendly_message(error_msg)
+                self.root.after(0, lambda: messagebox.showerror("检查错误", friendly_error))
             finally:
+                # 先设置结束时间，再调用check_completed
+                self.root.after(0, lambda: setattr(self, 'end_time', time.time()))
                 self.root.after(0, self.check_completed)
         
         thread = threading.Thread(target=run_check)
@@ -2257,11 +2536,27 @@ class GeoDataInspectorGUI:
     
     def check_completed(self):
         """检查完成后的处理"""
+        # 记录结束时间
+        self.end_time = time.time()
+        
         self.check_button.config(state=tk.NORMAL)
         self.export_button.config(state=tk.NORMAL)
         self.progress_var.set(100)
         self.status_var.set("检查完成")
-        self.status_bar_var.set("检查已完成，可以查看结果或导出报告")
+        
+        # 计算并显示总用时
+        if self.start_time and self.end_time:
+            total_time = self.end_time - self.start_time
+            if total_time > 60:
+                time_str = f"{total_time/60:.1f} 分钟"
+            elif total_time > 1:
+                time_str = f"{total_time:.1f} 秒"
+            else:
+                time_str = f"{total_time*1000:.0f} 毫秒"
+            
+            self.status_bar_var.set(f"检查已完成，总用时: {time_str}，可以查看结果或导出报告")
+        else:
+            self.status_bar_var.set("检查已完成，可以查看结果或导出报告")
         
         if self.results:
             # 显示完成统计
@@ -2272,7 +2567,7 @@ class GeoDataInspectorGUI:
             # 检查是否有字段合规性问题
             field_compliance_issues = []
             if self.results and isinstance(self.results, dict):
-                for file_result in self.results.get('files', []):
+                for file_result in self.results.get('files', []) if isinstance(self.results.get('files', []), list) else []:
                     for field in file_result.get('fields', []):
                         compliance_issues = field.get('compliance_issues', [])
                         if isinstance(compliance_issues, list) and compliance_issues:
@@ -2281,11 +2576,24 @@ class GeoDataInspectorGUI:
                                 if isinstance(issue, str):
                                     field_compliance_issues.append(issue)
             
+            # 计算检查用时
+            check_time_str = ""
+            if self.start_time:
+                # 确保end_time已设置
+                end_time = self.end_time if self.end_time else time.time()
+                total_time = end_time - self.start_time
+                if total_time > 60:
+                    check_time_str = f"{total_time/60:.1f} 分钟"
+                elif total_time > 1:
+                    check_time_str = f"{total_time:.1f} 秒"
+                else:
+                    check_time_str = f"{total_time*1000:.0f} 毫秒"
+            
             if error_files == 0 and not field_compliance_issues:
-                messagebox.showinfo("完成", f"检查完成！\n\n共检查 {total_files} 个文件\n没有发现错误")
+                messagebox.showinfo("完成", f"检查完成！\n\n共检查 {total_files} 个文件\n检查用时: {check_time_str}\n没有发现错误")
             else:
                 issue_count = error_files + len(field_compliance_issues)
-                messagebox.showwarning("完成", f"检查完成！\n\n共检查 {total_files} 个文件\n发现 {issue_count} 个问题\n请查看详细结果")
+                messagebox.showwarning("完成", f"检查完成！\n\n共检查 {total_files} 个文件\n检查用时: {check_time_str}\n发现 {issue_count} 个问题\n请查看详细结果")
         else:
             messagebox.showwarning("完成", "检查完成，但没有生成结果")
     
@@ -2296,9 +2604,24 @@ class GeoDataInspectorGUI:
         
         # 更新摘要
         summary = self.results['summary']
+        
+        # 计算检查用时
+        check_time_str = ""
+        if self.start_time:
+            # 如果end_time还没有设置，使用当前时间
+            end_time = self.end_time if self.end_time else time.time()
+            total_time = end_time - self.start_time
+            if total_time > 60:
+                check_time_str = f"{total_time/60:.1f} 分钟"
+            elif total_time > 1:
+                check_time_str = f"{total_time:.1f} 秒"
+            else:
+                check_time_str = f"{total_time*1000:.0f} 毫秒"
+        
         summary_text = f"""检查结果摘要
 {'='*50}
 检查时间: {summary['check_time']}
+检查用时: {check_time_str}
 检查文件总数: {summary['total_files']}
 SHP文件数量: {summary['shp_files']}
 DBF文件数量: {summary['dbf_files']}
@@ -2365,7 +2688,7 @@ DBF文件数量: {summary['dbf_files']}
         self.update_error_display(files)
     
     def update_error_display(self, files):
-        """优化错误信息显示"""
+        """优化错误信息显示 - 增强版"""
         error_text = "错误信息分类\n" + "="*50 + "\n\n"
         
         # 收集所有错误信息
@@ -2373,10 +2696,42 @@ DBF文件数量: {summary['dbf_files']}
         ignorable_errors = []  # 可忽略错误
         field_edit_info = {}  # 按字段分组的编辑信息
         
+        # 错误统计
+        error_stats = {
+            'critical': 0,
+            'high': 0,
+            'medium': 0,
+            'low': 0,
+            'total': 0
+        }
+        
         # 处理字段合规性问题
         for file_result in files:
             file_name = file_result.get('file_name', '')
             file_path = file_result.get('file_path', '')
+            
+            # 处理文件级错误
+            if file_result.get('error'):
+                error_msg = file_result['error']
+                error_type = UserFriendlyErrorHandler.classify_error(error_msg)
+                error_priority = UserFriendlyErrorHandler.get_error_priority(error_type)
+                
+                error_info = {
+                    'file_name': file_name,
+                    'file_path': file_path,
+                    'type': error_type,
+                    'priority': error_priority,
+                    'message': error_msg,
+                    'friendly_message': UserFriendlyErrorHandler.get_user_friendly_message(error_msg, file_name)
+                }
+                
+                if error_priority in ['critical', 'high']:
+                    critical_errors.append(error_info)
+                else:
+                    ignorable_errors.append(error_info)
+                
+                error_stats[error_priority] += 1
+                error_stats['total'] += 1
             
             # GDB多图层
             if file_result.get('layers'):
@@ -2504,24 +2859,42 @@ DBF文件数量: {summary['dbf_files']}
             error_text += "🚨 不可忽略错误 (必须修复):\n"
             error_text += "-" * 30 + "\n"
             for error in critical_errors:
-                error_text += f"📁 {error['file_name']}"
-                if error.get('layer_name'):
-                    error_text += f" (图层: {error['layer_name']})"
-                error_text += f"\n  字段: {error['field_name']}\n"
-                error_text += f"  问题: {', '.join(error['issues'])}\n"
-                error_text += f"  空值: {error['null_count']}, 唯一值: {error['unique_count']}\n\n"
+                if 'file_name' in error:
+                    error_text += f"📁 {error['file_name']}"
+                    if error.get('layer_name'):
+                        error_text += f" (图层: {error['layer_name']})"
+                    error_text += f"\n  字段: {error.get('field_name', 'N/A')}\n"
+                    error_text += f"  问题: {error.get('message', 'N/A')}\n"
+                    if 'null_count' in error and 'unique_count' in error:
+                        error_text += f"  空值: {error['null_count']}, 唯一值: {error['unique_count']}\n"
+                    error_text += "\n"
+                else:
+                    # 处理文件级错误
+                    error_text += f"📁 {error.get('file', 'N/A')}\n"
+                    error_text += f"  错误类型: {error.get('type', 'N/A')}\n"
+                    error_text += f"  错误信息: {error.get('message', 'N/A')}\n"
+                    error_text += f"  解决建议: {error.get('friendly_message', 'N/A')}\n\n"
         
         # 显示可忽略错误
         if ignorable_errors:
             error_text += "⚠️ 可忽略错误 (建议修复):\n"
             error_text += "-" * 30 + "\n"
             for error in ignorable_errors:
-                error_text += f"📁 {error['file_name']}"
-                if error.get('layer_name'):
-                    error_text += f" (图层: {error['layer_name']})"
-                error_text += f"\n  字段: {error['field_name']}\n"
-                error_text += f"  问题: {', '.join(error['issues'])}\n"
-                error_text += f"  空值: {error['null_count']}, 唯一值: {error['unique_count']}\n\n"
+                if 'file_name' in error:
+                    error_text += f"📁 {error['file_name']}"
+                    if error.get('layer_name'):
+                        error_text += f" (图层: {error['layer_name']})"
+                    error_text += f"\n  字段: {error.get('field_name', 'N/A')}\n"
+                    error_text += f"  问题: {error.get('message', 'N/A')}\n"
+                    if 'null_count' in error and 'unique_count' in error:
+                        error_text += f"  空值: {error['null_count']}, 唯一值: {error['unique_count']}\n"
+                    error_text += "\n"
+                else:
+                    # 处理文件级错误
+                    error_text += f"📁 {error.get('file', 'N/A')}\n"
+                    error_text += f"  错误类型: {error.get('type', 'N/A')}\n"
+                    error_text += f"  错误信息: {error.get('message', 'N/A')}\n"
+                    error_text += f"  解决建议: {error.get('friendly_message', 'N/A')}\n\n"
         
         # 处理其他错误类型
         errors = self.results.get('errors', []) if self.results and isinstance(self.results, dict) else []

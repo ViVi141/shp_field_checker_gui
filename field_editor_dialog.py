@@ -66,6 +66,12 @@ class FieldEditorDialog:
         self.search_results = []
         self.current_search_index = -1
         
+        # 初始化缺失的属性
+        self.search_var = None
+        self.replace_var = None
+        self.operation_count = 0
+        self.repair_text = None
+        
         # 创建弹窗
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(f"编辑字段: {field_name}")
@@ -388,10 +394,11 @@ class FieldEditorDialog:
             
             # 更新数据
             index = int(current_values[0]) - 1
-            if new_value == "":
-                self.modified_data.loc[index, self.field_name] = None
-            else:
-                self.modified_data.loc[index, self.field_name] = new_value
+            if self.modified_data is not None:
+                if new_value == "":
+                    self.modified_data.loc[index, self.field_name] = None
+                else:
+                    self.modified_data.loc[index, self.field_name] = new_value
             
             # 更新标签
             if is_null:
@@ -434,7 +441,8 @@ class FieldEditorDialog:
             self.tree.item(item, values=(current_values[0], "(空值)", "是"))
             
             # 更新数据
-            self.modified_data.loc[index, self.field_name] = None
+            if self.modified_data is not None:
+                self.modified_data.loc[index, self.field_name] = None
             
             self.status_var.set("已设为空值，请点击保存")
             self.record_operation('set_null')
@@ -467,53 +475,56 @@ class FieldEditorDialog:
             self.dialog.update()
             
             # 检查是否有修改
-            if self.original_data.equals(self.modified_data):
-                messagebox.showinfo("提示", "没有修改需要保存")
-                return
+            if self.original_data is not None and self.modified_data is not None:
+                if self.original_data.equals(self.modified_data):
+                    messagebox.showinfo("提示", "没有修改需要保存")
+                    return
             
             # 保存文件
-            if self.file_path.suffix.lower() == '.gdb':
-                # GDB文件保存
-                self.modified_data.to_file(self.file_path, driver='OpenFileGDB')
-            else:
-                # SHP/DBF文件保存 - 尝试多种编码
-                save_success = False
-                save_errors = []
-                
-                # 尝试UTF-8编码
-                try:
-                    self.modified_data.to_file(self.file_path, encoding='utf-8')
-                    save_success = True
-                    logger.info("使用UTF-8编码保存成功")
-                except Exception as e:
-                    save_errors.append(f"UTF-8保存失败: {e}")
-                
-                # 如果UTF-8失败，尝试GBK编码
-                if not save_success:
+            if self.modified_data is not None:
+                if self.file_path.suffix.lower() == '.gdb':
+                    # GDB文件保存
+                    self.modified_data.to_file(self.file_path, driver='OpenFileGDB')
+                else:
+                    # SHP/DBF文件保存 - 尝试多种编码
+                    save_success = False
+                    save_errors = []
+                    
+                    # 尝试UTF-8编码
                     try:
-                        self.modified_data.to_file(self.file_path, encoding='gbk')
+                        self.modified_data.to_file(self.file_path, encoding='utf-8')
                         save_success = True
-                        logger.info("使用GBK编码保存成功")
+                        logger.info("使用UTF-8编码保存成功")
                     except Exception as e:
-                        save_errors.append(f"GBK保存失败: {e}")
+                        save_errors.append(f"UTF-8保存失败: {e}")
+                    
+                    # 如果UTF-8失败，尝试GBK编码
+                    if not save_success:
+                        try:
+                            self.modified_data.to_file(self.file_path, encoding='gbk')
+                            save_success = True
+                            logger.info("使用GBK编码保存成功")
+                        except Exception as e:
+                            save_errors.append(f"GBK保存失败: {e}")
+                    
+                    # 如果GBK也失败，尝试使用错误处理
+                    if not save_success:
+                        try:
+                            self.modified_data.to_file(self.file_path, encoding='gbk', errors='replace')
+                            save_success = True
+                            logger.warning("使用GBK编码（错误替换模式）保存成功")
+                        except Exception as e:
+                            save_errors.append(f"GBK错误替换保存失败: {e}")
+                    
+                    if not save_success:
+                        raise Exception(f"所有保存方式都失败: {'; '.join(save_errors)}")
                 
-                # 如果GBK也失败，尝试使用错误处理
-                if not save_success:
-                    try:
-                        self.modified_data.to_file(self.file_path, encoding='gbk', errors='replace')
-                        save_success = True
-                        logger.warning("使用GBK编码（错误替换模式）保存成功")
-                    except Exception as e:
-                        save_errors.append(f"GBK错误替换保存失败: {e}")
+                self.status_var.set("保存成功")
+                messagebox.showinfo("成功", "修改已保存到原文件")
                 
-                if not save_success:
-                    raise Exception(f"所有保存方式都失败: {'; '.join(save_errors)}")
-            
-            self.status_var.set("保存成功")
-            messagebox.showinfo("成功", "修改已保存到原文件")
-            
-            # 更新原始数据
-            self.original_data = self.modified_data.copy()
+                # 更新原始数据
+                if self.modified_data is not None:
+                    self.original_data = self.modified_data.copy()
             
         except Exception as e:
             messagebox.showerror("错误", f"保存失败: {str(e)}")
@@ -523,14 +534,15 @@ class FieldEditorDialog:
     def revert_changes(self):
         """撤销修改"""
         if messagebox.askyesno("确认", "确定要撤销所有修改吗？"):
-            self.modified_data = self.original_data.copy()
-            self.populate_table(self.modified_data[self.field_name])
-            self.status_var.set("已撤销修改")
+            if self.original_data is not None:
+                self.modified_data = self.original_data.copy()
+                self.populate_table(self.modified_data[self.field_name])
+                self.status_var.set("已撤销修改")
     
     def run(self):
         """运行弹窗"""
         self.dialog.wait_window()
-        return self.modified_data is not None and not self.original_data.equals(self.modified_data) 
+        return self.modified_data is not None and self.original_data is not None and not self.original_data.equals(self.modified_data) 
 
     def batch_edit(self):
         """批量编辑对话框"""
@@ -598,9 +610,16 @@ class FieldEditorDialog:
         
         # 应用验证
         for item in self.tree.get_children():
-            value = self.tree.item(item)['values'][1]
+            item_data = self.tree.item(item)
+            values = item_data.get('values') if item_data else None
+            value = values[1] if values and len(values) > 1 else None
             try:
-                if pd.isna(value) or value == '':
+                is_null = False
+                try:
+                    is_null = bool(pd.isna(value))
+                except Exception:
+                    is_null = value is None
+                if is_null or value == '':
                     self.tree.set(item, 'validation', '空值')
                 elif str(field_type) in rules and rules[str(field_type)](value):
                     self.tree.set(item, 'validation', '有效')
@@ -723,8 +742,10 @@ class FieldEditorDialog:
         
         # 搜索
         for item in self.tree.get_children():
-            value = str(self.tree.item(item)['values'][1])
-            if search_text.lower() in value.lower():
+            item_data = self.tree.item(item)
+            values = item_data.get('values') if item_data else None
+            value = values[1] if values and len(values) > 1 else None
+            if search_text.lower() in str(value).lower():
                 self.search_results.append(item)
         
         if self.search_results:
@@ -859,11 +880,17 @@ class FieldEditorDialog:
             
             # 导入新数据
             for _, row in df.iterrows():
+                row_value = row.get('字段值', '') if row is not None and hasattr(row, 'get') else ''
+                is_null = False
+                try:
+                    is_null = bool(pd.isna(row_value))
+                except Exception:
+                    is_null = row_value is None
                 values = [
-                    row.get('序号', ''),
-                    row.get('字段值', ''),
-                    row.get('是否为空', '是' if pd.isna(row.get('字段值')) else '否'),
-                    row.get('验证状态', '')
+                    row.get('序号', '') if row is not None and hasattr(row, 'get') else '',
+                    row_value,
+                    '是' if is_null else '否',
+                    row.get('验证状态', '') if row is not None and hasattr(row, 'get') else ''
                 ]
                 self.tree.insert('', 'end', values=values)
             
@@ -887,7 +914,7 @@ class FieldEditorDialog:
             
             # 获取字段标准信息
             field_info = self.get_field_standards()
-            field_type = field_info.get('字段类型', '未知')
+            field_type = field_info.get('字段类型', '未知') if field_info is not None else '未知'
             
             # 计算统计信息
             stats = {
@@ -920,18 +947,18 @@ class FieldEditorDialog:
                     })
             
             # 更新统计文本
-            self.stats_text.config(state=tk.NORMAL)
-            self.stats_text.delete('1.0', tk.END)
+            self.stats_text.config(state=tk.NORMAL) if self.stats_text is not None else None
+            self.stats_text.delete('1.0', tk.END) if self.stats_text is not None else None
             for key, value in stats.items():
                 self.stats_text.insert(tk.END, f"{key}: {value}\n")
-            self.stats_text.config(state=tk.DISABLED)
+            self.stats_text.config(state=tk.DISABLED) if self.stats_text is not None else None
             
         except Exception as e:
             logger.error(f"更新统计信息时出错: {e}", exc_info=True)
-            self.stats_text.config(state=tk.NORMAL)
-            self.stats_text.delete('1.0', tk.END)
-            self.stats_text.insert(tk.END, "统计信息生成失败")
-            self.stats_text.config(state=tk.DISABLED)
+            self.stats_text.config(state=tk.NORMAL) if self.stats_text is not None else None
+            self.stats_text.delete('1.0', tk.END) if self.stats_text is not None else None
+            self.stats_text.insert(tk.END, "统计信息生成失败") if self.stats_text is not None else None
+            self.stats_text.config(state=tk.DISABLED) if self.stats_text is not None else None
 
     def select_all(self, event=None):
         """选择所有项"""
@@ -968,7 +995,7 @@ class FieldEditorDialog:
             messagebox.showwarning("警告", "请先选择要验证的项")
             return
         self.validate_data() 
-        return self.modified_data is not None and not self.original_data.equals(self.modified_data) 
+        return self.modified_data is not None and self.original_data is not None and not self.original_data.equals(self.modified_data) 
 
     def analyze_data_patterns(self):
         """分析数据模式和特征"""
@@ -982,9 +1009,10 @@ class FieldEditorDialog:
             
             # 收集所有值
             for item in self.tree.get_children():
-                values = self.tree.item(item)['values']
-                value = values[1]  # 字段值
-                is_null = values[2] == '是'  # 是否为空
+                item_data = self.tree.item(item)
+                values = item_data.get('values') if item_data else None
+                value = values[1] if values and len(values) > 1 else None
+                is_null = values[2] == '是' if values and len(values) > 2 else False
                 
                 logger.debug(f"处理行: 值={value}, 是否为空={is_null}")
                 
@@ -1063,9 +1091,9 @@ class FieldEditorDialog:
             
             # 获取字段标准信息
             field_info = self.get_field_standards()
-            field_alias = field_info.get('字段别名', self.field_name)
-            field_type = field_info.get('字段类型', '未知')
-            is_required = field_info.get('必填', False)
+            field_alias = field_info.get('字段别名', self.field_name) if field_info is not None else self.field_name
+            field_type = field_info.get('字段类型', '未知') if field_info is not None else '未知'
+            is_required = field_info.get('必填', False) if field_info is not None else False
             
             # 如果有空值且有数据模式
             if null_count > 0 and has_pattern:
@@ -1210,7 +1238,7 @@ class FieldEditorDialog:
         
         # 获取当前空值的行
         null_items = [item for item in self.tree.get_children()
-                     if self.tree.item(item)['values'][2] == '是']
+                     if isinstance(self.tree.item(item), dict) and 'values' in self.tree.item(item) and len(self.tree.item(item)['values']) > 2 and self.tree.item(item)['values'][2] == '是']
         
         if not null_items:
             suggestions.append("当前没有需要修复的空值。")
@@ -1243,10 +1271,11 @@ class FieldEditorDialog:
                     suggestions.append(f"• 常见长度为 {common_length} 个字符")
         
         # 更新建议文本
-        self.repair_text.config(state=tk.NORMAL)
-        self.repair_text.delete('1.0', tk.END)
-        self.repair_text.insert('1.0', '\n'.join(suggestions))
-        self.repair_text.config(state=tk.DISABLED)
+        if self.repair_text is not None:
+            self.repair_text.config(state=tk.NORMAL)
+            self.repair_text.delete('1.0', tk.END)
+            self.repair_text.insert('1.0', '\n'.join(suggestions))
+            self.repair_text.config(state=tk.DISABLED)
 
     def apply_repair_suggestions(self):
         """应用修复建议"""
@@ -1256,7 +1285,7 @@ class FieldEditorDialog:
         
         # 获取空值项
         null_items = [item for item in self.tree.get_children()
-                     if self.tree.item(item)['values'][2] == '是']
+                     if isinstance(self.tree.item(item), dict) and 'values' in self.tree.item(item) and len(self.tree.item(item)['values']) > 2 and self.tree.item(item)['values'][2] == '是']
         
         if not null_items:
             messagebox.showinfo("提示", "没有需要修复的空值")
@@ -1308,10 +1337,11 @@ class FieldEditorDialog:
                 values = tree.item(item)['values']
                 item_id = values[0]
                 suggested = values[2]
-                
                 # 更新主表格中的值
                 for main_item in null_items:
-                    if self.tree.item(main_item)['values'][0] == item_id:
+                    main_item_data = self.tree.item(main_item)
+                    if (isinstance(main_item_data, dict) and 'values' in main_item_data and
+                        isinstance(main_item_data['values'], (list, tuple)) and len(main_item_data['values']) > 0 and main_item_data['values'][0] == item_id):
                         self.tree.set(main_item, 'value', suggested)
                         self.tree.set(main_item, 'is_null', '否')
                         break
@@ -1337,7 +1367,7 @@ class FieldEditorDialog:
             
             # 获取所有空值项
             null_items = [item for item in self.tree.get_children()
-                         if self.tree.item(item)['values'][2] == '是']
+                         if isinstance(self.tree.item(item), dict) and 'values' in self.tree.item(item) and len(self.tree.item(item)['values']) > 2 and self.tree.item(item)['values'][2] == '是']
             
             if not null_items:
                 messagebox.showinfo("提示", "没有需要填充的空值")
@@ -1383,7 +1413,7 @@ class FieldEditorDialog:
             
             # 获取所有空值项
             null_items = [item for item in self.tree.get_children()
-                         if self.tree.item(item)['values'][2] == '是']
+                         if isinstance(self.tree.item(item), dict) and 'values' in self.tree.item(item) and len(self.tree.item(item)['values']) > 2 and self.tree.item(item)['values'][2] == '是']
             
             # 填充所有空值
             for item in null_items:
@@ -1432,8 +1462,9 @@ class FieldEditorDialog:
         
         count = 0
         for item in selected:
-            value = self.tree.item(item)['values'][1]
-            if pd.isna(value) or value == "":
+            item_data = self.tree.item(item)
+            value = item_data.get('values')[1] if item_data else None
+            if value is None or pd.isna(value) or value == "":
                 continue
                 
             if transform_type == 'upper':
@@ -1504,8 +1535,9 @@ class FieldEditorDialog:
             
             count = 0
             for item in selected:
-                value = str(self.tree.item(item)['values'][1])
-                if pd.isna(value) or value == "":
+                item_data = self.tree.item(item)
+                value = item_data.get('values')[1] if item_data else None
+                if value is None or pd.isna(value) or value == "":
                     continue
                 
                 if not case_sensitive_var.get():
