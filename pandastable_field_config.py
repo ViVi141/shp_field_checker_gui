@@ -70,6 +70,8 @@ class FieldConfigPandasTable:
             "唯一": [],
             "字段长度": []
         })
+        # 定义字段类型的下拉列表选项，扩展更多类型
+        self.field_types = ["Text", "Integer", "Double", "Date", "Boolean", "Float", "Long", "Short", "Binary", "Time", "Timestamp", "Decimal", "Object", "Geometry"]
 
     def setup_ui(self):
         button_frame = ttk.Frame(self.main_frame)
@@ -85,8 +87,11 @@ class FieldConfigPandasTable:
         table_frame = tk.Frame(self.main_frame)
         table_frame.pack(fill=tk.BOTH, expand=True)
 
+        # 创建表格
         self.table = Table(table_frame, dataframe=self.df, showtoolbar=True, showstatusbar=True)
         self.table.show()
+        
+        # 设置表格格式
         try:
             self.table.autoResizeColumns()
         except:
@@ -95,6 +100,127 @@ class FieldConfigPandasTable:
             self.table.setRowHeight(28)
         except:
             pass
+            
+        # 设置下拉菜单格式 - 在表格创建后立即设置
+        self.setup_dropdowns()
+        
+    def setup_dropdowns(self):
+        """设置下拉菜单"""
+        try:
+            # 绑定单击事件
+            self.table.bind('<ButtonRelease-1>', self.on_cell_click)
+            print("下拉菜单事件绑定完成")
+        except Exception as e:
+            print(f"设置下拉菜单时出错: {e}")
+
+    def on_cell_click(self, event):
+        """单元格点击事件处理"""
+        try:
+            # 使用pandastable的方法获取点击的行列
+            row = self.table.get_row_clicked(event)
+            col = self.table.get_col_clicked(event)
+            
+            if row is not None and col is not None:
+                # 获取列名
+                col_name = self.table.model.df.columns[col]
+                print(f"点击了列: {col_name}, 行: {row}")
+                
+                # 根据列名显示相应的下拉选择
+                if col_name == "字段类型":
+                    self.show_type_dropdown(event.x_root, event.y_root, row)
+                elif col_name in ["必填", "唯一"]:
+                    self.show_yes_no_dropdown(event.x_root, event.y_root, row, col_name)
+                    
+        except Exception as e:
+            print(f"单元格点击事件处理失败: {e}")
+    
+    def show_type_dropdown(self, x, y, row):
+        """显示字段类型下拉选择"""
+        try:
+            # 创建下拉选择窗口
+            dropdown = tk.Toplevel(self.root)
+            dropdown.geometry(f"+{x}+{y}")
+            dropdown.overrideredirect(True)
+            dropdown.configure(bg='white', relief='solid', bd=1)
+            
+            # 创建列表框
+            listbox = tk.Listbox(dropdown, height=min(len(self.field_types), 8), 
+                                bg='white', relief='solid', bd=1)
+            for field_type in self.field_types:
+                listbox.insert(tk.END, field_type)
+            
+            listbox.pack()
+            
+            def on_select(event):
+                selection = listbox.curselection()
+                if selection:
+                    selected_type = listbox.get(selection[0])
+                    print(f"选择了字段类型: {selected_type}")
+                    # 更新表格中的值
+                    self.df.iloc[row, 2] = selected_type  # 字段类型是第3列
+                    self.table.updateModel(TableModel(self.df))
+                    self.table.redraw()
+                dropdown.destroy()
+            
+            def on_escape(event):
+                dropdown.destroy()
+            
+            listbox.bind('<Double-1>', on_select)
+            listbox.bind('<Return>', on_select)
+            dropdown.bind('<Escape>', on_escape)
+            
+            # 设置焦点
+            listbox.focus_set()
+            listbox.selection_set(0)
+            
+            print("字段类型下拉菜单已显示")
+            
+        except Exception as e:
+            print(f"显示字段类型下拉失败: {e}")
+    
+    def show_yes_no_dropdown(self, x, y, row, col_name):
+        """显示是/否下拉选择"""
+        try:
+            # 创建下拉选择窗口
+            dropdown = tk.Toplevel(self.root)
+            dropdown.geometry(f"+{x}+{y}")
+            dropdown.overrideredirect(True)
+            dropdown.configure(bg='white', relief='solid', bd=1)
+            
+            # 创建列表框
+            listbox = tk.Listbox(dropdown, height=2, bg='white', relief='solid', bd=1)
+            listbox.insert(tk.END, "是")
+            listbox.insert(tk.END, "否")
+            
+            listbox.pack()
+            
+            def on_select(event):
+                selection = listbox.curselection()
+                if selection:
+                    selected_value = listbox.get(selection[0])
+                    print(f"选择了{col_name}: {selected_value}")
+                    # 更新表格中的值
+                    col_index = 3 if col_name == "必填" else 4  # 必填是第4列，唯一是第5列
+                    self.df.iloc[row, col_index] = selected_value
+                    self.table.updateModel(TableModel(self.df))
+                    self.table.redraw()
+                dropdown.destroy()
+            
+            def on_escape(event):
+                dropdown.destroy()
+            
+            listbox.bind('<Double-1>', on_select)
+            listbox.bind('<Return>', on_select)
+            dropdown.bind('<Escape>', on_escape)
+            
+            # 设置焦点
+            listbox.focus_set()
+            listbox.selection_set(0)
+            
+            print(f"{col_name}下拉菜单已显示")
+            
+        except Exception as e:
+            print(f"显示是/否下拉失败: {e}")
 
     def load_default_data(self):
         data = []
@@ -111,6 +237,9 @@ class FieldConfigPandasTable:
         self.df.columns = ["字段名称", "字段别名", "字段类型", "必填", "唯一", "字段长度"]
         self.table.updateModel(TableModel(self.df))
         self.table.redraw()
+        
+        # 重新设置下拉菜单
+        self.setup_dropdowns()
 
     def add_field(self):
         existing_fields = self.df["字段名称"].tolist()
@@ -207,7 +336,9 @@ class FieldConfigPandasTable:
             })
             self.table.updateModel(TableModel(self.df))
             self.table.redraw()
-            messagebox.showinfo("成功", "已创建空白配置文件，请添加字段")
+            print("已创建空白配置文件")
+            # 明确保持窗口打开
+            self.root.focus_force()
 
     def get_field_config(self):
         config_data = {}
