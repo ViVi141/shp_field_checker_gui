@@ -584,7 +584,7 @@ def get_field_error_level(field_name, file_name):
     # 转换为大写以便比较
     file_name_upper = file_name.upper()
     
-    # 定义特殊规则
+    # 定义特殊规则（默认配置，可被用户配置覆盖）
     critical_fields_for_special_files = {
         'GHMC': ['YDFW', 'GHJX'],  # 规划名称字段在YDFW或GHJX文件中为不可忽略
         'PFDATE': ['YDFW', 'GHJX']  # 批准日期字段在YDFW或GHJX文件中为不可忽略
@@ -3382,14 +3382,68 @@ DBF文件数量: {summary['dbf_files']}
         """打开字段配置对话框 - 使用PandasTable"""
         try:
             from pandastable_field_config import FieldConfigPandasTable
-            dialog = FieldConfigPandasTable(self.root, default_standards=DEFAULT_FIELD_STANDARDS)
+            
+            # 获取当前的重要文件配置
+            current_critical_files = self.get_critical_files_config()
+            
+            dialog = FieldConfigPandasTable(
+                self.root, 
+                default_standards=DEFAULT_FIELD_STANDARDS,
+                critical_files_config=current_critical_files
+            )
             dialog.run()
-            # 获取配置并更新到主程序
-            config = dialog.get_field_config()
-            self.field_config_manager.update_field_standards(config)
+            
+            # 获取完整配置并更新到主程序
+            complete_config = dialog.get_complete_config()
+            self.field_config_manager.update_field_standards(complete_config["field_standards"])
+            
+            # 更新重要文件配置
+            self.update_critical_files_config(complete_config["critical_files"])
+            
         except Exception as e:
             messagebox.showerror("错误", f"打开字段配置失败: {str(e)}")
             messagebox.showinfo("提示", "请确保已安装pandastable: pip install pandastable")
+    
+    def get_critical_files_config(self):
+        """获取当前重要文件配置"""
+        # 默认配置
+        return {
+            "GHMC": ["YDFW", "GHJX"],  # 规划名称字段在YDFW或GHJX文件中为不可忽略
+            "PFDATE": ["YDFW", "GHJX"]  # 批准日期字段在YDFW或GHJX文件中为不可忽略
+        }
+    
+    def update_critical_files_config(self, new_config):
+        """更新重要文件配置"""
+        try:
+            # 这里可以将配置保存到文件或内存中
+            # 目前先保存到实例变量中
+            self.critical_files_config = new_config
+            logger.info(f"已更新重要文件配置: {new_config}")
+        except Exception as e:
+            logger.error(f"更新重要文件配置失败: {e}")
+    
+    def get_field_error_level(self, field_name, file_name):
+        """根据字段名和文件名确定错误等级 - 使用用户配置"""
+        try:
+            # 获取当前重要文件配置
+            critical_files_config = getattr(self, 'critical_files_config', self.get_critical_files_config())
+            
+            # 转换为大写以便比较
+            file_name_upper = file_name.upper()
+            
+            # 检查是否为特殊字段
+            if field_name in critical_files_config:
+                required_patterns = critical_files_config[field_name]
+                for pattern in required_patterns:
+                    if pattern.upper() in file_name_upper:
+                        return ERROR_LEVELS['CRITICAL']  # 不可忽略
+            
+            # 默认返回可忽略
+            return ERROR_LEVELS['IGNORABLE']
+            
+        except Exception as e:
+            logger.error(f"获取字段错误等级失败: {e}")
+            return ERROR_LEVELS['IGNORABLE']
     
     def clear_results(self):
         """清空结果"""
