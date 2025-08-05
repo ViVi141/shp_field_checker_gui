@@ -28,7 +28,7 @@ import shapely.affinity
 import shapely.ops
 from shapely import wkt
 import math
-import fiona
+import pyogrio
 
 
 logger = logging.getLogger(__name__)
@@ -238,8 +238,8 @@ class GeometryEditorDialog:
                     self.original_gdf = gpd.read_file(self.file_path, layer=self.layer_name)
                 else:
                     # 读取第一个图层
-                    import fiona  # 修复未定义fiona的问题
-                    layers = fiona.listlayers(str(self.file_path))
+                    import pyogrio  # 修复未定义pyogrio的问题
+                    layers = pyogrio.list_layers(str(self.file_path))
                     if layers:
                         self.original_gdf = gpd.read_file(self.file_path, layer=layers[0])
                     else:
@@ -303,8 +303,8 @@ class GeometryEditorDialog:
                     if self.layer_name:
                         self.original_gdf = gpd.read_file(self.file_path, layer=self.layer_name, ignore_geometry=True)
                     else:
-                        import fiona
-                        layers = fiona.listlayers(str(self.file_path))
+                        import pyogrio
+                        layers = pyogrio.list_layers(str(self.file_path))
                         if layers:
                             self.original_gdf = gpd.read_file(self.file_path, layer=layers[0], ignore_geometry=True)
                         else:
@@ -346,82 +346,49 @@ class GeometryEditorDialog:
             self.status_var.set("尝试重新构建几何...")
             self.dialog.update()
             
-            # 使用fiona直接读取几何数据
-            import fiona
+            # 使用pyogrio读取数据
+            import pyogrio
             geometries = []
             
             if self.file_path.suffix.lower() == '.gdb':
                 if self.layer_name:
-                    with fiona.open(str(self.file_path), layer=self.layer_name) as src:
-                        for feature in src:
-                            try:
-                                geom = shape(feature['geometry'])
-                                if geom.is_valid:
-                                    geometries.append(geom)
-                                else:
-                                    # 尝试修复无效几何
-                                    fixed_geom = make_valid(geom)
-                                    if fixed_geom is not None:
-                                        geometries.append(fixed_geom)
-                                    else:
-                                        geometries.append(None)
-                            except Exception:
-                                geometries.append(None)
+                    # 使用pyogrio读取数据
+                    try:
+                        gdf = pyogrio.read_dataframe(str(self.file_path), layer=self.layer_name)
+                        geometries = gdf.geometry.tolist()
+                    except Exception:
+                        # 如果读取失败，尝试忽略几何
+                        gdf = pyogrio.read_dataframe(str(self.file_path), layer=self.layer_name, ignore_geometry=True)
+                        geometries = [None] * len(gdf)
                 else:
-                    layers = fiona.listlayers(str(self.file_path))
+                    layers = pyogrio.list_layers(str(self.file_path))
                     if layers:
-                        with fiona.open(str(self.file_path), layer=layers[0]) as src:
-                            for feature in src:
-                                try:
-                                    geom = shape(feature['geometry'])
-                                    if geom.is_valid:
-                                        geometries.append(geom)
-                                    else:
-                                        fixed_geom = make_valid(geom)
-                                        if fixed_geom is not None:
-                                            geometries.append(fixed_geom)
-                                        else:
-                                            geometries.append(None)
-                                except Exception:
-                                    geometries.append(None)
-            else:
-                with fiona.open(str(self.file_path)) as src:
-                    for feature in src:
                         try:
-                            geom = shape(feature['geometry'])
-                            if geom.is_valid:
-                                geometries.append(geom)
-                            else:
-                                fixed_geom = make_valid(geom)
-                                if fixed_geom is not None:
-                                    geometries.append(fixed_geom)
-                                else:
-                                    geometries.append(None)
+                            gdf = pyogrio.read_dataframe(str(self.file_path), layer=layers[0])
+                            geometries = gdf.geometry.tolist()
                         except Exception:
-                            geometries.append(None)
+                            # 如果读取失败，尝试忽略几何
+                            gdf = pyogrio.read_dataframe(str(self.file_path), layer=layers[0], ignore_geometry=True)
+                            geometries = [None] * len(gdf)
+            else:
+                try:
+                    gdf = pyogrio.read_dataframe(str(self.file_path))
+                    geometries = gdf.geometry.tolist()
+                except Exception:
+                    # 如果读取失败，尝试忽略几何
+                    gdf = pyogrio.read_dataframe(str(self.file_path), ignore_geometry=True)
+                    geometries = [None] * len(gdf)
             
             # 创建新的GeoDataFrame
             if geometries:
-                # 读取属性数据
-                if self.file_path.suffix.lower() == '.gdb':
-                    if self.layer_name:
-                        df = gpd.read_file(self.file_path, layer=self.layer_name, ignore_geometry=True)
-                    else:
-                        layers = fiona.listlayers(str(self.file_path))
-                        if layers:
-                            df = gpd.read_file(self.file_path, layer=layers[0], ignore_geometry=True)
-                        else:
-                            raise ValueError("无法读取属性数据")
-                else:
-                    df = gpd.read_file(self.file_path, ignore_geometry=True)
-                
+                # 我们已经通过pyogrio读取了数据，现在处理几何
                 # 确保几何列表长度与数据框一致
-                while len(geometries) < len(df):
+                while len(geometries) < len(gdf):
                     geometries.append(None)
-                geometries = geometries[:len(df)]
+                geometries = geometries[:len(gdf)]
                 
                 # 创建GeoDataFrame
-                self.original_gdf = gpd.GeoDataFrame(df, geometry=geometries)
+                self.original_gdf = gpd.GeoDataFrame(gdf.drop(columns=['geometry']), geometry=geometries)
                 self.modified_gdf = self.original_gdf.copy()
                 
                 self.update_geometry_info()
@@ -948,7 +915,7 @@ class GeometryEditorDialog:
                     self.modified_gdf.to_file(self.file_path, layer=self.layer_name, driver='OpenFileGDB')
                 else:
                     # 保存到第一个图层
-                    layers = fiona.listlayers(str(self.file_path))
+                    layers = pyogrio.list_layers(str(self.file_path))
                     if layers:
                         self.modified_gdf.to_file(self.file_path, layer=layers[0], driver='OpenFileGDB')
             else:

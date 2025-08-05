@@ -44,7 +44,7 @@ a = Analysis(
     ],
     hiddenimports=[
         'geopandas',
-        'fiona',
+        'pyogrio',
         'shapely',
         'pyproj',
         'pandas',

@@ -21,9 +21,8 @@ import csv
 import difflib
 
 # 抑制编码转换警告
-warnings.filterwarnings('ignore', category=UserWarning, module='fiona')
-warnings.filterwarnings('ignore', category=UserWarning, module='geopandas')
 warnings.filterwarnings('ignore', category=UserWarning, module='pyogrio')
+warnings.filterwarnings('ignore', category=UserWarning, module='geopandas')
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='pyogrio')
 warnings.filterwarnings('ignore', message='.*One or several characters couldn\'t be converted correctly.*')
 warnings.filterwarnings('ignore', message='.*couldn\'t be converted correctly.*')

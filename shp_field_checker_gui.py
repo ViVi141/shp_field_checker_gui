@@ -254,7 +254,7 @@ def configure_system_fonts():
 warnings.filterwarnings('ignore')
 
 # 抑制编码转换警告
-warnings.filterwarnings('ignore', category=UserWarning, module='fiona')
+warnings.filterwarnings('ignore', category=UserWarning, module='pyogrio')
 warnings.filterwarnings('ignore', category=UserWarning, module='geopandas')
 warnings.filterwarnings('ignore', category=UserWarning, module='pyogrio')
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='pyogrio')
