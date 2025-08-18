@@ -1,12 +1,12 @@
 # 核心数据处理 - 项目中直接使用
-numpy>=1.21.0
+numpy==2.1.3
 pandas>=1.3.0
 geopandas>=0.10.0
 
 # 地理数据处理 - 项目中直接使用
 shapely>=1.8.0
 pyproj>=3.3.0
-pyogrio>=0.5.0
+pyogrio==0.10.0
 
 # GDB支持 - 项目中直接使用
 # pyogrio已包含GDB支持，无需额外依赖
@@ -20,4 +20,7 @@ openpyxl>=3.0.9
 pandastable>=0.12.3
 
 # 打包工具（用于生成exe）
-pyinstaller>=5.0.0 
+pyinstaller==6.15.0
+
+# 运行时监控
+psutil>=5.9.0

@@ -61,7 +61,7 @@ if errorlevel 1 (
 echo 提交成功！
 echo.
 echo 提示: 如需推送到远程仓库，请使用以下命令:
-echo git remote add origin https://gitee.com/your-username/space-planning-spider.git
+echo git remote add origin https://gitee.com/your-username/
 echo git push -u origin master
 echo.
 pause
