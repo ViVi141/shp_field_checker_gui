@@ -818,9 +818,21 @@ def check_topology_overlaps(geometries, tolerance=0.001):
                 continue
     return overlaps
 
-def check_geometry_validity(geometries):
-    """检查几何有效性"""
+def check_geometry_validity(geometries, auto_fix=False, tolerance=0.001):
+    """检查几何有效性，可选择自动修复
+    
+    Args:
+        geometries: 几何对象列表
+        auto_fix: 是否自动修复可修复的几何错误
+        tolerance: 修复容差
+        
+    Returns:
+        invalid_geometries: 无效几何列表
+        fixed_geometries: 已修复的几何索引列表（如果auto_fix=True）
+    """
     invalid_geometries = []
+    fixed_geometries = []
+    
     for i, geom in enumerate(geometries):
         if geom is None:
             invalid_geometries.append({
@@ -841,14 +853,21 @@ def check_geometry_validity(geometries):
             try:
                 fixed_geom = make_valid(geom)
                 if fixed_geom.is_valid:
-                    invalid_geometries.append({
-                        'feature': i,
-                        'error': f'几何无效但可修复: {geom.is_valid_reason if hasattr(geom, "is_valid_reason") else "线性环未闭合"}',
-                        'type': '几何检查',
-                        'severity': 'fixable',
-                        'original_error': geom.is_valid_reason if hasattr(geom, "is_valid_reason") else "线性环未闭合",
-                        'fix_suggestion': '使用几何修复工具自动修复'
-                    })
+                    if auto_fix:
+                        # 自动修复模式：直接替换原几何
+                        geometries[i] = fixed_geom
+                        fixed_geometries.append(i)
+                        logger.info(f"已自动修复几何 {i}: {geom.is_valid_reason if hasattr(geom, 'is_valid_reason') else '线性环未闭合'}")
+                    else:
+                        # 检测模式：只记录问题
+                        invalid_geometries.append({
+                            'feature': i,
+                            'error': f'几何无效但可修复: {geom.is_valid_reason if hasattr(geom, "is_valid_reason") else "线性环未闭合"}',
+                            'type': '几何检查',
+                            'severity': 'fixable',
+                            'original_error': geom.is_valid_reason if hasattr(geom, "is_valid_reason") else "线性环未闭合",
+                            'fix_suggestion': '使用几何修复工具自动修复'
+                        })
                 else:
                     invalid_geometries.append({
                         'feature': i,
@@ -863,7 +882,147 @@ def check_geometry_validity(geometries):
                     'type': '几何检查',
                     'severity': 'critical'
                 })
-    return invalid_geometries
+    
+    return invalid_geometries, fixed_geometries
+
+def auto_fix_geometry_file(file_path, tolerance=0.001):
+    """自动修复单个文件的几何错误
+    
+    Args:
+        file_path: 文件路径
+        tolerance: 修复容差
+        
+    Returns:
+        dict: 修复结果统计
+    """
+    try:
+        logger.info(f"开始自动修复几何文件: {file_path}")
+        
+        # 读取文件
+        gdf = gpd.read_file(file_path)
+        if gdf.empty:
+            return {'success': False, 'error': '文件为空'}
+        
+        # 统计修复前的几何问题
+        total_geometries = len(gdf)
+        invalid_before = sum(1 for geom in gdf.geometry if geom is not None and not geom.is_valid)
+        
+        if invalid_before == 0:
+            return {'success': True, 'message': '没有发现几何错误', 'fixed_count': 0}
+        
+        # 修复几何错误
+        fixed_count = 0
+        error_count = 0
+        fixed_indices = []
+        
+        for idx, row in gdf.iterrows():
+            try:
+                geom = row.geometry
+                if geom is not None and not geom.is_valid:
+                    # 尝试修复
+                    fixed_geom = make_valid(geom)
+                    if fixed_geom.is_valid:
+                        gdf.at[idx, 'geometry'] = fixed_geom
+                        fixed_count += 1
+                        fixed_indices.append(idx)
+                        logger.info(f"已修复几何 {idx}")
+                    else:
+                        error_count += 1
+                        logger.warning(f"几何 {idx} 无法修复")
+            except Exception as e:
+                error_count += 1
+                logger.error(f"修复几何 {idx} 时出错: {e}")
+        
+        # 保存修复后的文件
+        if fixed_count > 0:
+            # 创建备份文件
+            backup_path = str(file_path) + '.backup'
+            gdf.to_file(backup_path)
+            logger.info(f"已创建备份文件: {backup_path}")
+            
+            # 保存修复后的文件
+            gdf.to_file(file_path)
+            logger.info(f"已保存修复后的文件: {file_path}")
+        
+        result = {
+            'success': True,
+            'total_geometries': total_geometries,
+            'invalid_before': invalid_before,
+            'fixed_count': fixed_count,
+            'error_count': error_count,
+            'fixed_indices': fixed_indices,
+            'backup_path': backup_path if fixed_count > 0 else None
+        }
+        
+        logger.info(f"几何修复完成: 修复 {fixed_count} 个，失败 {error_count} 个")
+        return result
+        
+    except Exception as e:
+        error_msg = f"自动修复几何文件失败: {str(e)}"
+        logger.error(error_msg)
+        return {'success': False, 'error': error_msg}
+
+def auto_fix_geometry_batch(file_paths, tolerance=0.001, progress_callback=None):
+    """批量自动修复多个文件的几何错误
+    
+    Args:
+        file_paths: 文件路径列表
+        tolerance: 修复容差
+        progress_callback: 进度回调函数
+        
+    Returns:
+        dict: 批量修复结果统计
+    """
+    total_files = len(file_paths)
+    successful_files = 0
+    failed_files = 0
+    total_fixed = 0
+    total_errors = 0
+    results = []
+    
+    logger.info(f"开始批量修复 {total_files} 个文件的几何错误")
+    
+    for i, file_path in enumerate(file_paths):
+        try:
+            if progress_callback:
+                progress_callback(i + 1, total_files, f"正在修复: {Path(file_path).name}")
+            
+            # 修复单个文件
+            result = auto_fix_geometry_file(file_path, tolerance)
+            results.append({
+                'file_path': file_path,
+                'result': result
+            })
+            
+            if result['success']:
+                successful_files += 1
+                if 'fixed_count' in result:
+                    total_fixed += result['fixed_count']
+                if 'error_count' in result:
+                    total_errors += result['error_count']
+            else:
+                failed_files += 1
+                
+        except Exception as e:
+            failed_files += 1
+            error_msg = f"处理文件 {file_path} 时出错: {str(e)}"
+            logger.error(error_msg)
+            results.append({
+                'file_path': file_path,
+                'result': {'success': False, 'error': error_msg}
+            })
+    
+    summary = {
+        'total_files': total_files,
+        'successful_files': successful_files,
+        'failed_files': failed_files,
+        'total_fixed': total_fixed,
+        'total_errors': total_errors,
+        'results': results
+    }
+    
+    logger.info(f"批量修复完成: 成功 {successful_files} 个文件，失败 {failed_files} 个文件，共修复 {total_fixed} 个几何错误")
+    return summary
 
 def check_coordinate_system(gdf):
     """检查数学基础（坐标系统）"""
@@ -1135,7 +1294,8 @@ def check_field_value_consistency(gdf):
 class GeoDataInspector:
     """地理数据质检器"""
     
-    def __init__(self, input_dir: str, output_dir: Optional[str] = None, field_config_manager=None):
+    def __init__(self, input_dir: str, output_dir: Optional[str] = None, field_config_manager=None, 
+                 auto_fix_geometry=False, geometry_tolerance=0.001):
         """
         初始化检查器
         
@@ -1143,10 +1303,16 @@ class GeoDataInspector:
             input_dir: 输入目录路径
             output_dir: 输出目录路径，默认为当前目录
             field_config_manager: 字段配置管理器
+            auto_fix_geometry: 是否自动修复几何错误
+            geometry_tolerance: 几何修复容差
         """
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir) if output_dir else Path.cwd()
         self.output_dir.mkdir(exist_ok=True)
+        
+        # 几何修复配置
+        self.auto_fix_geometry = auto_fix_geometry
+        self.geometry_tolerance = geometry_tolerance
         
         # 使用配置管理器中的字段标准
         if field_config_manager:
@@ -1161,7 +1327,8 @@ class GeoDataInspector:
             'errors': [],
             'topology_issues': [],
             'attribute_issues': [],
-            'basic_issues': []
+            'basic_issues': [],
+            'geometry_fixes': []  # 新增：几何修复记录
         }
         
         # 存储所有几何数据和属性数据用于跨文件检查
@@ -1183,6 +1350,168 @@ class GeoDataInspector:
                 geospatial_files.append(gdb_path)
         
         return geospatial_files
+    
+    def auto_fix_geometry_in_file(self, file_path: Path) -> Dict:
+        """自动修复单个文件中的几何错误
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            dict: 修复结果
+        """
+        try:
+            logger.info(f"开始修复文件几何错误: {file_path.name}")
+            
+            # 读取文件
+            gdf = gpd.read_file(file_path)
+            if gdf.empty:
+                return {'success': False, 'error': '文件为空'}
+            
+            # 统计修复前的几何问题
+            total_geometries = len(gdf)
+            invalid_before = sum(1 for geom in gdf.geometry if geom is not None and not geom.is_valid)
+            
+            if invalid_before == 0:
+                return {'success': True, 'message': '没有发现几何错误', 'fixed_count': 0}
+            
+            # 修复几何错误
+            fixed_count = 0
+            error_count = 0
+            fixed_indices = []
+            
+            for idx, row in gdf.iterrows():
+                try:
+                    geom = row.geometry
+                    if geom is not None and not geom.is_valid:
+                        # 尝试修复
+                        fixed_geom = make_valid(geom)
+                        if fixed_geom.is_valid:
+                            gdf.at[idx, 'geometry'] = fixed_geom
+                            fixed_count += 1
+                            fixed_indices.append(idx)
+                            logger.info(f"已修复几何 {idx}")
+                        else:
+                            error_count += 1
+                            logger.warning(f"几何 {idx} 无法修复")
+                except Exception as e:
+                    error_count += 1
+                    logger.error(f"修复几何 {idx} 时出错: {e}")
+            
+            # 保存修复后的文件
+            if fixed_count > 0:
+                # 创建备份文件
+                backup_path = str(file_path) + '.backup'
+                gdf.to_file(backup_path)
+                logger.info(f"已创建备份文件: {backup_path}")
+                
+                # 保存修复后的文件
+                gdf.to_file(file_path)
+                logger.info(f"已保存修复后的文件: {file_path}")
+                
+                # 记录修复信息
+                self.results['geometry_fixes'].append({
+                    'file_path': str(file_path),
+                    'file_name': file_path.name,
+                    'total_geometries': total_geometries,
+                    'invalid_before': invalid_before,
+                    'fixed_count': fixed_count,
+                    'error_count': error_count,
+                    'fixed_indices': fixed_indices,
+                    'backup_path': backup_path,
+                    'fix_time': datetime.now().isoformat()
+                })
+            
+            result = {
+                'success': True,
+                'total_geometries': total_geometries,
+                'invalid_before': invalid_before,
+                'fixed_count': fixed_count,
+                'error_count': error_count,
+                'fixed_indices': fixed_indices,
+                'backup_path': backup_path if fixed_count > 0 else None
+            }
+            
+            logger.info(f"几何修复完成: 修复 {fixed_count} 个，失败 {error_count} 个")
+            return result
+            
+        except Exception as e:
+            error_msg = f"自动修复几何文件失败: {str(e)}"
+            logger.error(error_msg)
+            return {'success': False, 'error': error_msg}
+    
+    def auto_fix_all_geometry_files(self, progress_callback=None) -> Dict:
+        """自动修复所有文件的几何错误
+        
+        Args:
+            progress_callback: 进度回调函数
+            
+        Returns:
+            dict: 批量修复结果统计
+        """
+        try:
+            logger.info("开始批量修复所有文件的几何错误")
+            
+            # 查找所有地理空间文件
+            geospatial_files = self.find_geospatial_files()
+            total_files = len(geospatial_files)
+            
+            if total_files == 0:
+                return {'success': False, 'error': '没有找到地理空间文件'}
+            
+            successful_files = 0
+            failed_files = 0
+            total_fixed = 0
+            total_errors = 0
+            results = []
+            
+            for i, file_path in enumerate(geospatial_files):
+                try:
+                    if progress_callback:
+                        progress_callback(i + 1, total_files, f"正在修复: {file_path.name}")
+                    
+                    # 修复单个文件
+                    result = self.auto_fix_geometry_in_file(file_path)
+                    results.append({
+                        'file_path': str(file_path),
+                        'result': result
+                    })
+                    
+                    if result['success']:
+                        successful_files += 1
+                        if 'fixed_count' in result:
+                            total_fixed += result['fixed_count']
+                        if 'error_count' in result:
+                            total_errors += result['error_count']
+                    else:
+                        failed_files += 1
+                        
+                except Exception as e:
+                    failed_files += 1
+                    error_msg = f"处理文件 {file_path} 时出错: {str(e)}"
+                    logger.error(error_msg)
+                    results.append({
+                        'file_path': str(file_path),
+                        'result': {'success': False, 'error': error_msg}
+                    })
+            
+            summary = {
+                'success': True,
+                'total_files': total_files,
+                'successful_files': successful_files,
+                'failed_files': failed_files,
+                'total_fixed': total_fixed,
+                'total_errors': total_errors,
+                'results': results
+            }
+            
+            logger.info(f"批量修复完成: 成功 {successful_files} 个文件，失败 {failed_files} 个文件，共修复 {total_fixed} 个几何错误")
+            return summary
+            
+        except Exception as e:
+            error_msg = f"批量修复几何文件失败: {str(e)}"
+            logger.error(error_msg)
+            return {'success': False, 'error': error_msg}
     
     def check_shp_file(self, shp_path: Path) -> Dict:
         """检查单个SHP文件的字段信息（优化大文件处理）"""
@@ -1324,7 +1653,36 @@ class GeoDataInspector:
                     sample_geometries = gdf.geometry.tolist()
                     sample_gdf = gdf
                 
-                geom_issues = check_geometry_validity(sample_geometries)
+                # 几何检查（支持自动修复）
+                if self.auto_fix_geometry:
+                    # 自动修复模式
+                    geom_issues, fixed_geometries = check_geometry_validity(sample_geometries, auto_fix=True, tolerance=self.geometry_tolerance)
+                    
+                    # 如果有修复的几何，更新原始数据
+                    if fixed_geometries:
+                        logger.info(f"已自动修复 {len(fixed_geometries)} 个几何错误")
+                        # 更新原始几何数据
+                        for idx in fixed_geometries:
+                            if idx < len(gdf):
+                                gdf.at[idx, 'geometry'] = sample_geometries[idx]
+                        
+                        # 保存修复后的文件
+                        backup_path = str(shp_path) + '.backup'
+                        gdf.to_file(backup_path)
+                        logger.info(f"已创建备份文件: {backup_path}")
+                        gdf.to_file(shp_path)
+                        logger.info(f"已保存修复后的文件: {shp_path}")
+                        
+                        # 记录修复信息
+                        result['geometry_fixes'] = {
+                            'fixed_count': len(fixed_geometries),
+                            'backup_path': backup_path,
+                            'fix_time': datetime.now().isoformat()
+                        }
+                else:
+                    # 检测模式
+                    geom_issues, _ = check_geometry_validity(sample_geometries, auto_fix=False)
+                
                 if geom_issues:
                     result['basic_issues'].extend(geom_issues)
                     self.results['basic_issues'].extend([{
@@ -2189,6 +2547,10 @@ class GeoDataInspectorGUI:
         self.estimated_remaining = ""
         self.memory_usage = ""
         
+        # 几何修复配置
+        self.auto_fix_geometry_var = tk.BooleanVar(value=False)
+        self.geometry_tolerance_var = tk.DoubleVar(value=0.001)
+        
         self.setup_ui()
         self.load_last_directories()
     
@@ -2261,6 +2623,26 @@ class GeoDataInspectorGUI:
         self.export_button.pack(side=tk.LEFT, padx=(0, 10))
         
         ttk.Button(left_buttons, text="🗑️ 清空结果", command=self.clear_results).pack(side=tk.LEFT)
+        
+        # 几何修复选项
+        geometry_frame = ttk.Frame(control_frame)
+        geometry_frame.pack(side=tk.LEFT, padx=(20, 0))
+        
+        # 自动修复复选框
+        auto_fix_check = ttk.Checkbutton(geometry_frame, text="🔧 自动修复几何", 
+                                        variable=self.auto_fix_geometry_var)
+        auto_fix_check.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # 容差设置
+        ttk.Label(geometry_frame, text="容差:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 5))
+        tolerance_entry = ttk.Entry(geometry_frame, textvariable=self.geometry_tolerance_var, 
+                                   width=8, font=("Arial", 9))
+        tolerance_entry.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # 几何修复按钮
+        self.geometry_fix_button = ttk.Button(geometry_frame, text="🔧 修复几何", 
+                                             command=self.fix_geometry_only)
+        self.geometry_fix_button.pack(side=tk.LEFT)
         
         # 右侧状态显示
         right_frame = ttk.Frame(control_frame)
@@ -2541,7 +2923,22 @@ class GeoDataInspectorGUI:
         def run_check():
             try:
                 logger.info(f"开始检查目录: {input_dir}")
-                self.checker = GeoDataInspector(input_dir, output_dir, self.field_config_manager)
+                
+                # 获取几何修复配置
+                auto_fix_geometry = self.auto_fix_geometry_var.get()
+                geometry_tolerance = self.geometry_tolerance_var.get()
+                
+                logger.info(f"几何修复配置: 自动修复={auto_fix_geometry}, 容差={geometry_tolerance}")
+                
+                # 创建检查器实例，传入几何修复配置
+                self.checker = GeoDataInspector(
+                    input_dir, 
+                    output_dir, 
+                    self.field_config_manager,
+                    auto_fix_geometry=auto_fix_geometry,
+                    geometry_tolerance=geometry_tolerance
+                )
+                
                 self.results = self.checker.run_check(progress_callback=self.update_progress)
                 
                 # 在主线程中更新UI
@@ -2663,6 +3060,9 @@ DBF文件数量: {summary['dbf_files']}
 拓扑问题数量: {summary.get('topology_issues', 0)}
 属性问题数量: {summary.get('attribute_issues', 0)}
 基础问题数量: {summary.get('basic_issues', 0)}
+
+几何修复信息:
+几何修复记录: {len(self.results.get('geometry_fixes', []))} 个文件
 """
         self.summary_text.delete(1.0, tk.END)
         self.summary_text.insert(1.0, summary_text)
@@ -2708,6 +3108,14 @@ DBF文件数量: {summary['dbf_files']}
                     detail_text += "基础问题:\n"
                     for issue in file_result['basic_issues']:
                         detail_text += f"  {issue.get('type', '未知')}: {issue.get('error', '未知错误')}\n"
+                
+                # 几何修复信息
+                if file_result.get('geometry_fixes'):
+                    detail_text += "几何修复信息:\n"
+                    fix_info = file_result['geometry_fixes']
+                    detail_text += f"  修复几何数量: {fix_info.get('fixed_count', 0)} 个\n"
+                    detail_text += f"  备份文件: {fix_info.get('backup_path', 'N/A')}\n"
+                    detail_text += f"  修复时间: {fix_info.get('fix_time', 'N/A')}\n"
             
             detail_text += "\n" + "-"*50 + "\n\n"
         
@@ -3459,6 +3867,128 @@ DBF文件数量: {summary['dbf_files']}
             self.file_count_var.set("文件: 0")
             self.export_button.config(state=tk.DISABLED)
             logger.info("已清空检查结果")
+    
+    def fix_geometry_only(self):
+        """仅修复几何错误，不进行其他检查"""
+        input_dir = self.input_dir_var.get().strip()
+        
+        if not input_dir:
+            messagebox.showerror("错误", "请选择输入目录")
+            return
+        
+        if not os.path.exists(input_dir):
+            messagebox.showerror("错误", "输入目录不存在")
+            return
+        
+        # 确认操作
+        if not messagebox.askyesno("确认修复", 
+                                  "确定要修复目录中所有文件的几何错误吗？\n\n"
+                                  "注意：修复前会自动创建备份文件(.backup)"):
+            return
+        
+        # 禁用按钮
+        self.geometry_fix_button.config(state=tk.DISABLED)
+        self.check_button.config(state=tk.DISABLED)
+        
+        # 重置进度和状态
+        self.progress_var.set(0)
+        self.status_var.set("准备开始修复几何...")
+        self.status_bar_var.set("正在初始化几何修复...")
+        
+        # 记录开始时间
+        self.start_time = time.time()
+        self.end_time = None
+        
+        # 在新线程中运行几何修复
+        def run_geometry_fix():
+            try:
+                logger.info(f"开始修复目录几何错误: {input_dir}")
+                
+                # 获取几何修复配置
+                geometry_tolerance = self.geometry_tolerance_var.get()
+                
+                # 创建检查器实例
+                self.checker = GeoDataInspector(
+                    input_dir, 
+                    self.output_dir_var.get().strip() or str(Path.cwd()), 
+                    self.field_config_manager,
+                    auto_fix_geometry=False,  # 这里设为False，因为我们要手动调用修复
+                    geometry_tolerance=geometry_tolerance
+                )
+                
+                # 执行几何修复
+                fix_results = self.checker.auto_fix_all_geometry_files(
+                    progress_callback=self.update_progress
+                )
+                
+                # 在主线程中更新UI
+                self.root.after(0, lambda: self.show_geometry_fix_results(fix_results))
+                logger.info("几何修复完成")
+                
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"几何修复过程中出现错误: {error_msg}")
+                
+                # 使用用户友好的错误处理
+                friendly_error = UserFriendlyErrorHandler.get_user_friendly_message(error_msg)
+                self.root.after(0, lambda: messagebox.showerror("修复错误", friendly_error))
+            finally:
+                # 恢复按钮状态
+                self.root.after(0, lambda: setattr(self, 'end_time', time.time()))
+                self.root.after(0, self.geometry_fix_completed)
+        
+        thread = threading.Thread(target=run_geometry_fix)
+        thread.daemon = True
+        thread.start()
+    
+    def show_geometry_fix_results(self, fix_results):
+        """显示几何修复结果"""
+        if not fix_results or not fix_results.get('success'):
+            error_msg = fix_results.get('error', '未知错误') if fix_results else '未知错误'
+            messagebox.showerror("修复失败", f"几何修复失败: {error_msg}")
+            return
+        
+        # 显示修复结果摘要
+        summary = f"""几何修复完成！
+
+修复统计:
+• 总文件数: {fix_results['total_files']}
+• 成功修复: {fix_results['successful_files']} 个文件
+• 修复失败: {fix_results['failed_files']} 个文件
+• 总修复几何: {fix_results['total_fixed']} 个
+• 总错误数: {fix_results['total_errors']} 个
+
+详细信息已记录到日志中。"""
+        
+        messagebox.showinfo("修复完成", summary)
+        
+        # 更新状态
+        self.status_var.set("几何修复完成")
+        self.status_bar_var.set(f"几何修复完成，共修复 {fix_results['total_fixed']} 个几何错误")
+    
+    def geometry_fix_completed(self):
+        """几何修复完成后的处理"""
+        # 记录结束时间
+        self.end_time = time.time()
+        
+        # 恢复按钮状态
+        self.geometry_fix_button.config(state=tk.NORMAL)
+        self.check_button.config(state=tk.NORMAL)
+        self.progress_var.set(100)
+        
+        # 计算并显示总用时
+        if self.start_time and self.end_time:
+            total_time = self.end_time - self.start_time
+            if total_time > 60:
+                time_str = f"{total_time/60:.1f} 分钟"
+            elif total_time > 1:
+                time_str = f"{total_time:.1f} 秒"
+            else:
+                time_str = f"{total_time*1000:.0f} 毫秒"
+            
+            self.status_bar_var.set(f"几何修复已完成，总用时: {time_str}")
+        else:
+            self.status_bar_var.set("几何修复已完成")
     
     def run(self):
         """运行GUI"""
