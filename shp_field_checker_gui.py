@@ -2789,7 +2789,7 @@ class GeoDataInspectorGUI:
         title_label.pack(side=tk.LEFT)
 
         # 版本信息
-        version_label = ttk.Label(title_frame, text="v2.0",
+        version_label = ttk.Label(title_frame, text="v2.1",
                                  font=("TkDefaultFont", 10), foreground="#666666")
         version_label.pack(side=tk.RIGHT, pady=(0, 5))
 
