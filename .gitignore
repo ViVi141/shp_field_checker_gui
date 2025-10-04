@@ -68,4 +68,8 @@ dist/
 
 # Test files
 test_*.py
-*_test.py 
+*_test.py
+
+# Markdown files (except README.md)
+*.md
+!README.md
